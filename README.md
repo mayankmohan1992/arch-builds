@@ -84,3 +84,32 @@ delete the old one.
 * `sudo pacman -Syyuu` to let stock packages win again (the double `u` is what
   permits the downgrade back to `-1`/`-1.1` pkgrels).
 * Cache in `/var/cache/pacman/pkg` keeps the previous builds.
+
+## Current state
+
+| Package | Version | Why it is here |
+|---|---|---|
+| `xmrig-cuda-tuned` | 6.26.0-1 | Needs the CUDA toolkit and a long `nvcc` compile; also replaces stock `xmrig` (`provides`/`conflicts`). Built against the CUDA stub, so the plugin `dlopen`s `libcuda.so.1` from the real driver at runtime. |
+
+Repository URL:
+`https://github.com/mayankmohan1992/arch-builds/releases/download/mayank-v4`
+
+Verify by hand at any time:
+
+```sh
+curl -sfLO https://github.com/mayankmohan1992/arch-builds/releases/download/mayank-v4/mayank-v4.db
+curl -sfLO https://github.com/mayankmohan1992/arch-builds/releases/download/mayank-v4/mayank-v4.db.sig
+gpg --verify mayank-v4.db.sig mayank-v4.db
+bsdtar -tf mayank-v4.db
+```
+
+## Activate on this machine (one time, needs root)
+
+```sh
+cd ~/arch-builds && sudo bash scripts/setup-local-repo.sh
+```
+
+That trusts `keys/mayank-v4.asc`, inserts `[mayank-v4]` before `[core]`, and
+runs `pacman -Sy`. From then on `omarchy update` picks up new builds with no
+extra steps. `~/.config/omarchy/hooks/pre-refresh-pacman.d/20-mayank-v4.sh`
+re-adds the stanza if Omarchy ever rewrites `pacman.conf`.
