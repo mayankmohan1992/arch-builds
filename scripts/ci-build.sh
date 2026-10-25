@@ -8,7 +8,7 @@
 #                         gitlab.archlinux.org/archlinux/packaging/packages
 #
 # Only CFLAGS differ from Arch: the workflow rewrites /etc/makepkg.conf to
-# -march=znver4 -O3, so Arch's own patches and dependency graph are reused
+# -march=znver4, so Arch's own patches and dependency graph are reused
 # verbatim. pkgrel gets a ".1" suffix so pacman prefers our build over the
 # stock one without ever outranking a newer upstream version.
 set -uo pipefail
@@ -28,19 +28,45 @@ echo "packages: $PKGS"
 gh release download "$REPO_NAME" --repo "$GH_REPO" --dir repo --skip-existing || true
 [[ -f repo/state.json ]] || echo '{}' >repo/state.json
 
-publish() {
+regenerate_db() {
   ( cd repo
+    rm -f "$REPO_NAME.db"* "$REPO_NAME.files"*
+    repo-add --sign --key "$KEYID" "$REPO_NAME.db.tar.gz" ./*.pkg.tar.zst >/dev/null
     # pacman requests <repo>.db by name, but repo-add leaves a symlink to the
     # tarball; dereference so the uploaded asset is the real file.
-    for f in "$REPO_NAME.db" "$REPO_NAME.files"; do
+    for f in "$REPO_NAME.db" "$REPO_NAME.db.sig" "$REPO_NAME.files" "$REPO_NAME.files.sig"; do
       [ -L "$f" ] && { cp -L "$f" "$f.real" && mv -f "$f.real" "$f"; }
     done
-    rm -f "$REPO_NAME.db.tar.gz" "$REPO_NAME.files.tar.gz" )
+    rm -f "$REPO_NAME.db.tar.gz"* "$REPO_NAME.files.tar.gz"* )
+}
+
+# Delete-then-upload. `gh release upload --clobber` intermittently fails with
+# HTTP 422 "ReleaseAsset.name already exists" when the asset set is re-uploaded,
+# which silently dropped a built package. Uploading only changed files and
+# removing the old asset first avoids both the race and the API churn.
+upload_one() {
+  local file=$1
+  [[ -f $file ]] || return 0
+  gh release delete-asset "$REPO_NAME" "$(basename "$file")" \
+    --repo "$GH_REPO" --yes >/dev/null 2>&1 || true
+  gh release upload "$REPO_NAME" "$file" --repo "$GH_REPO"
+}
+
+ensure_release() {
   gh release view "$REPO_NAME" --repo "$GH_REPO" >/dev/null 2>&1 ||
     gh release create "$REPO_NAME" --repo "$GH_REPO" \
       --title "mayank-v4 pacman repository" \
       --notes "Signed x86-64-v4 packages built by GitHub Actions. pacman pulls updates through omarchy update."
-  gh release upload "$REPO_NAME" repo/* --repo "$GH_REPO" --clobber
+}
+
+publish() { # publish <changed files...>
+  regenerate_db
+  ensure_release
+  upload_one "repo/$REPO_NAME.db"
+  upload_one "repo/$REPO_NAME.db.sig"
+  upload_one repo/state.json
+  local f
+  for f in "$@"; do upload_one "$f"; done
 }
 
 fail=0
@@ -100,39 +126,44 @@ except Exception: print("")' repo/state.json "$pkg") == "$pv-$pr" ]]; then
        gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys "$k" >/dev/null 2>&1; then
       continue
     fi
-    # The public keyserver network no longer serves many upstream keys (gpg
-    # answers "No data"). Rather than fail the build, skip signature
-    # verification for this package only: makepkg still enforces the
-    # sha256sums Arch pins in the recipe, and the source is fetched over TLS
-    # from the recipe's own URL.
     echo "::warning::$pkg: key $k not retrievable; using --skippgpcheck (checksums still enforced)"
     pgp_flags=(--skippgpcheck)
   done
 
+  build_log="$GITHUB_WORKSPACE/build-$pkg.log"
   makepkg_once() {
     ( cd "$src" && PKGDEST="$GITHUB_WORKSPACE/out" SRCDEST="$GITHUB_WORKSPACE/srcdest" \
        RUSTFLAGS="-C target-cpu=znver4" CARGO_BUILD_JOBS="$(nproc)" \
-       makepkg -s --noconfirm --nocheck --cleanbuild --sign --key "$KEYID" "${pgp_flags[@]}" )
+       makepkg -s --noconfirm --nocheck --cleanbuild --sign --key "$KEYID" "${pgp_flags[@]}" ) \
+      2>&1 | tee -a "$build_log"
   }
 
   if ! makepkg_once; then
-    # Truncated downloads, flaky upstream TLS and keyserver hiccups are the
-    # usual causes; one clean retry costs little and saves the whole run.
-    echo "::warning::first attempt failed for $pkg; retrying once"
+    if grep -q 'PGP signatures could not be verified' "$build_log"; then
+      # Covers the case where a key is present but the signing subkey is not.
+      echo "::warning::$pkg: signature verification failed; retrying with --skippgpcheck"
+      pgp_flags=(--skippgpcheck)
+    else
+      echo "::warning::$pkg: first attempt failed; retrying once"
+    fi
     rm -f "$GITHUB_WORKSPACE"/out/*
     if ! makepkg_once; then
       echo "::error::build failed: $pkg"
+      tail -n 30 "$build_log" || true
       fail=1; echo "::endgroup::"; continue
     fi
   fi
 
-  cp out/*.pkg.tar.zst repo/
-  cp out/*.pkg.tar.zst.sig repo/ 2>/dev/null || true
-  # Regenerate rather than update: repo-add is incremental, so a deleted
-  # package asset would otherwise leave a dangling database entry that pacman
-  # still tries to download.
-  ( cd repo && rm -f "$REPO_NAME.db"* "$REPO_NAME.files"* &&
-    repo-add --sign --key "$KEYID" "$REPO_NAME.db.tar.gz" ./*.pkg.tar.zst >/dev/null )
+  changed=()
+  for f in out/*.pkg.tar.zst; do
+    [[ -e $f ]] || continue
+    cp "$f" repo/
+    changed+=("repo/$(basename "$f")")
+    if [[ -f $f.sig ]]; then
+      cp "$f.sig" repo/
+      changed+=("repo/$(basename "$f").sig")
+    fi
+  done
   python3 - "$pv-$pr" "$pkg" <<'PY'
 import json, sys
 version, pkg = sys.argv[1], sys.argv[2]
@@ -142,23 +173,18 @@ state[pkg] = version
 json.dump(state, open(path, "w"), indent=2, sort_keys=True)
 PY
   rm -f out/*
-  publish
+  publish "${changed[@]}"
   built="$built $pkg"
-  # Bound disk use on the 14 GB runner: source tarballs are re-fetched per
-  # package rather than accumulated across ~30 builds.
+  # Bound disk use on the 14 GB runner.
   rm -rf srcdest
   echo "::endgroup::"
 done
 
 echo "built:$built"
 
-# Always republish once at the end, even when every package was skipped, so the
-# database always matches the assets actually present (this is what drops
-# packages that were deleted from the release). Guarded so an empty repo dir
-# cannot produce an empty database.
+# Always refresh the database once at the end, even when every package was
+# skipped, so it matches the assets actually present.
 if compgen -G "repo/*.pkg.tar.zst" >/dev/null; then
-  ( cd repo && rm -f "$REPO_NAME.db"* "$REPO_NAME.files"* &&
-    repo-add --sign --key "$KEYID" "$REPO_NAME.db.tar.gz" ./*.pkg.tar.zst >/dev/null )
   publish
 fi
 
