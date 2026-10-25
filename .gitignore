@@ -1,0 +1,5 @@
+out/
+repo/
+srcdest/
+*.pkg.tar.zst
+*.pkg.tar.zst.sig

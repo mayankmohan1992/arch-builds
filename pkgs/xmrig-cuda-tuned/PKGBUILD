@@ -1,0 +1,70 @@
+# Maintainer: Mayank Mohan <er.mayankmohan@gmail.com>
+# XMRig built for THIS machine's CPU (Zen 4 / znver4) with the NVIDIA CUDA
+# backend enabled so the dGPU can mine RandomX alongside the CPU.
+# Replaces the stock `xmrig` package (provides/conflicts) because XMRig may
+# only load a CUDA plugin that was compiled into it at build time.
+#
+# Built by .github/workflows/build.yml on an Arch container, signed and
+# published to the mayank-v4 pacman repository.
+pkgname=xmrig-cuda-tuned
+_cudaver=6.22.1
+pkgver=6.26.0
+pkgrel=1
+pkgdesc='RandomX CPU+GPU miner, built with -march=znver4 and CUDA support'
+arch=('x86_64')
+url='https://github.com/xmrig/xmrig'
+license=('GPL-3.0-only')
+depends=('gcc-libs' 'glibc' 'openssl' 'cuda')
+makedepends=('git' 'cmake')
+provides=('xmrig')
+conflicts=('xmrig' 'xmrig-cuda')
+options=('!strip' '!lto')
+source=("xmrig-$pkgver.tar.gz::https://github.com/xmrig/xmrig/archive/v$pkgver.tar.gz"
+        "xmrig-cuda-$_cudaver.tar.gz::https://github.com/xmrig/xmrig-cuda/archive/v$_cudaver.tar.gz"
+        'cuda13-clockrate.patch')
+sha256sums=('5005144e78571f26586410c2b2ede2b0c72afe22f97f1708ea24cfb253c3939b'
+            '0fb1312f000a172fc84191bc260005a801043c61c450db20c08848bda34ce11d'
+            '5891b01beaeeef66bbbc33c1690f4dd3023dbe29a190f3d12473779ba74db975')
+
+prepare() {
+  cd "xmrig-cuda-$_cudaver"
+  # cudaDeviceProp::clockRate / memoryClockRate were removed in CUDA 13.
+  patch -Np1 -i "$srcdir/cuda13-clockrate.patch"
+}
+
+build() {
+  # --- CUDA plugin (RandomX kernels for NVIDIA) ---
+  cmake -S "xmrig-cuda-$_cudaver" -B build-cuda \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCUDA_ARCH=120 \
+    -DWITH_RANDOMX=ON -DWITH_CN_LITE=OFF -DWITH_CN_HEAVY=OFF \
+    -DWITH_CN_PICO=OFF -DWITH_CN_FEMTO=OFF -DWITH_KAWPOW=OFF \
+    -DWITH_CN_R=OFF -DWITH_ARGON2=OFF
+  cmake --build build-cuda -j"$(nproc)"
+
+  # --- miner, with the plugin interface compiled in ---
+  cmake -S "xmrig-$pkgver" -B build \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_C_FLAGS="-O3 -march=znver4 -mtune=znver4 -pipe" \
+    -DCMAKE_CXX_FLAGS="-O3 -march=znver4 -mtune=znver4 -pipe" \
+    -DWITH_CUDA=ON \
+    -DWITH_OPENCL=OFF \
+    -DWITH_MSR=ON \
+    -DWITH_HWLOC=ON \
+    -DWITH_TLS=ON \
+    -DWITH_HTTP=ON \
+    -DWITH_RANDOMX=ON \
+    -DWITH_KAWPOW=OFF \
+    -DWITH_CN_LITE=OFF -DWITH_CN_HEAVY=OFF -DWITH_CN_PICO=OFF \
+    -DWITH_CN_FEMTO=OFF -DWITH_CN_R=OFF -DWITH_CN_GPU=OFF \
+    -DWITH_ARGON2=OFF -DWITH_SODIUM=OFF -DWITH_UV=ON \
+    -DWITH_OPENSSL=ON -DWITH_HTTPD=ON \
+    -DBUILD_STATIC=OFF
+  cmake --build build -j"$(nproc)"
+}
+
+package() {
+  install -Dm755 build/xmrig "$pkgdir/usr/bin/xmrig"
+  install -Dm755 build-cuda/libxmrig-cuda.so "$pkgdir/usr/lib/libxmrig-cuda.so"
+  install -Dm644 "xmrig-$pkgver/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

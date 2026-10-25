@@ -1,0 +1,17 @@
+--- a/src/cuda_extra.cu
++++ b/src/cuda_extra.cu
+@@ -551,8 +551,14 @@
+     ctx->device_mpcount         = props.multiProcessorCount;
+     ctx->device_arch[0]         = props.major;
+     ctx->device_arch[1]         = props.minor;
++#if CUDART_VERSION >= 13000
++    // CUDA 13 dropped the deprecated clockRate / memoryClockRate fields.
++    ctx->device_clockRate       = 0;
++    ctx->device_memoryClockRate = 0;
++#else
+     ctx->device_clockRate       = props.clockRate;
+     ctx->device_memoryClockRate = props.memoryClockRate;
++#endif
+     ctx->device_pciBusID        = props.pciBusID;
+     ctx->device_pciDeviceID     = props.pciDeviceID;
+     ctx->device_pciDomainID     = props.pciDomainID;

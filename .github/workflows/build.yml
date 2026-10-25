@@ -1,0 +1,119 @@
+name: build-package
+
+# Builds one PKGBUILD from pkgs/<name> on an Arch container, signs it, rebuilds
+# the pacman database and publishes everything to the "mayank-v4" release.
+#
+# Free-tier constraints this respects:
+#   * public repo  -> standard runners are free and unlimited
+#   * releases     -> no total size or bandwidth limit, 2 GiB per asset
+#   * 14 GB SSD    -> no Chromium-scale trees; small/medium packages only
+#   * 6 h job cap  -> kept well under it
+#
+# Artifacts are deliberately NOT used: the free plan caps artifact storage at
+# 500 MB, while release assets are free for public repositories.
+
+on:
+  workflow_dispatch:
+    inputs:
+      pkg:
+        description: "Package directory under pkgs/"
+        required: true
+        default: "xmrig-cuda-tuned"
+  push:
+    branches: [main]
+    paths:
+      - "pkgs/**"
+      - ".github/workflows/build.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: repo-publish
+  cancel-in-progress: false
+
+env:
+  REPO_NAME: mayank-v4
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare builder
+        run: |
+          pacman -Syu --noconfirm --needed git github-cli gnupg sudo
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' >/etc/sudoers.d/builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          # Keep every stock Arch setting, override only the target CPU. Using
+          # the system config means we inherit hardening flags and defaults
+          # instead of maintaining a fragile copy.
+          sed -z -i \
+            's/CFLAGS="[^"]*"/CFLAGS="-march=znver4 -O3 -pipe -fno-plt -fexceptions -Wp,-D_FORTIFY_SOURCE=3 -Wformat -Werror=format-security -fstack-clash-protection -fcf-protection -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer"/' \
+            /etc/makepkg.conf
+          sed -z -i \
+            's/CXXFLAGS="[^"]*"/CXXFLAGS="$CFLAGS -Wp,-D_GLIBCXX_ASSERTIONS"/' \
+            /etc/makepkg.conf
+          grep -m2 -E '^(CFLAGS|CXXFLAGS)=' /etc/makepkg.conf
+
+      - name: Import signing key
+        env:
+          PKG_SIGNING_KEY: ${{ secrets.PKG_SIGNING_KEY }}
+        run: |
+          install -d -o builder -g builder -m 700 /home/builder/.gnupg
+          printf '%s\n' "$PKG_SIGNING_KEY" >/tmp/key.asc
+          chown builder /tmp/key.asc
+          runuser -u builder -- gpg --batch --import /tmp/key.asc
+          rm -f /tmp/key.asc
+          runuser -u builder -- gpg --list-secret-keys --with-colons >/tmp/keys.txt
+          KEYID=$(awk -F: '/^fpr:/{print $10; exit}' /tmp/keys.txt)
+          test -n "$KEYID"
+          echo "KEYID=$KEYID" >>"$GITHUB_ENV"
+          echo "Signing with $KEYID"
+
+      - name: Build package
+        run: |
+          pkg="${{ inputs.pkg || 'xmrig-cuda-tuned' }}"
+          test -d "pkgs/$pkg"
+          runuser -u builder -- env \
+            PKGDEST="$GITHUB_WORKSPACE/out" \
+            SRCDEST="$GITHUB_WORKSPACE/srcdest" \
+            RUSTFLAGS="-C target-cpu=znver4" \
+            CARGO_BUILD_JOBS="$(nproc)" \
+            bash -c "cd '$GITHUB_WORKSPACE/pkgs/$pkg' && makepkg -s --noconfirm --cleanbuild --sign --key '$KEYID'"
+          ls -la "$GITHUB_WORKSPACE/out"
+
+      - name: Assemble repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p repo
+          # The runner is ephemeral, so the existing database and packages are
+          # pulled back from the release first. Without this each build would
+          # publish a database containing only its own package.
+          gh release download "$REPO_NAME" --dir repo --skip-existing || true
+          cp out/*.pkg.tar.zst repo/
+          cp out/*.pkg.tar.zst.sig repo/ 2>/dev/null || true
+          cd repo
+          repo-add --sign --key "$KEYID" "$REPO_NAME.db.tar.gz" ./*.pkg.tar.zst
+          # pacman requests <repo>.db by name, but repo-add leaves a symlink to
+          # the tarball; dereference it so the uploaded asset is the real file.
+          for f in "$REPO_NAME.db" "$REPO_NAME.files"; do
+            [ -L "$f" ] && { cp -L "$f" "$f.real" && mv -f "$f.real" "$f"; }
+          done
+          rm -f "$REPO_NAME.db.tar.gz" "$REPO_NAME.files.tar.gz"
+          ls -la
+
+      - name: Publish to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$REPO_NAME" >/dev/null 2>&1 ||
+            gh release create "$REPO_NAME" \
+              --title "mayank-v4 pacman repository" \
+              --notes "Signed x86-64-v4 packages built by GitHub Actions. Add with the mayank-v4 repo stanza; pacman pulls updates through omarchy update."
+          gh release upload "$REPO_NAME" repo/* --clobber
