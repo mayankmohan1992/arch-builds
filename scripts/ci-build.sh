@@ -19,7 +19,7 @@ cd "${GITHUB_WORKSPACE:?}"
 mkdir -p repo out srcdest
 
 if [[ -z ${PKGS:-} ]]; then
-  PKGS=$(tr '\n' ' ' <packages.txt)
+  PKGS=$(grep -vE '^[[:space:]]*(#|$)' packages.txt | tr '\n' ' ')
 fi
 echo "packages: $PKGS"
 
@@ -66,6 +66,18 @@ for pkg in $PKGS; do
     awk -F' = ' '/^\tpkgver/{v=$2} /^\tpkgrel/{r=$2} END{print v, r}')
   echo "building $pkg $pv-$pr"
 
+  # Arch's recipes verify upstream release signatures, and a fresh container
+  # has an empty keyring. Import every key the recipe declares so makepkg can
+  # actually validate the sources instead of us disabling the check.
+  mapfile -t vkeys < <(cd "$src" && makepkg --printsrcinfo |
+    awk -F' = ' '/^\tvalidpgpkeys/{print $2}')
+  for k in "${vkeys[@]}"; do
+    [[ -z $k ]] && continue
+    gpg --batch --keyserver hkps://keyserver.ubuntu.com --recv-keys "$k" >/dev/null 2>&1 ||
+      gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys "$k" >/dev/null 2>&1 ||
+      echo "::warning::could not import PGP key $k for $pkg"
+  done
+
   if ! ( cd "$src" && PKGDEST="$GITHUB_WORKSPACE/out" SRCDEST="$GITHUB_WORKSPACE/srcdest" \
          RUSTFLAGS="-C target-cpu=znver4" CARGO_BUILD_JOBS="$(nproc)" \
          makepkg -s --noconfirm --nocheck --cleanbuild --sign --key "$KEYID" ); then
@@ -75,7 +87,11 @@ for pkg in $PKGS; do
 
   cp out/*.pkg.tar.zst repo/
   cp out/*.pkg.tar.zst.sig repo/ 2>/dev/null || true
-  ( cd repo && repo-add --sign --key "$KEYID" "$REPO_NAME.db.tar.gz" ./*.pkg.tar.zst >/dev/null )
+  # Regenerate rather than update: repo-add is incremental, so a deleted
+  # package asset would otherwise leave a dangling database entry that pacman
+  # still tries to download.
+  ( cd repo && rm -f "$REPO_NAME.db"* "$REPO_NAME.files"* &&
+    repo-add --sign --key "$KEYID" "$REPO_NAME.db.tar.gz" ./*.pkg.tar.zst >/dev/null )
   python3 - "$pv-$pr" "$pkg" <<'PY'
 import json, sys
 version, pkg = sys.argv[1], sys.argv[2]

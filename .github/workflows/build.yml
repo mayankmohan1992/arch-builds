@@ -59,6 +59,9 @@ jobs:
           sed -z -i \
             's/CXXFLAGS="[^"]*"/CXXFLAGS="$CFLAGS -Wp,-D_GLIBCXX_ASSERTIONS"/' \
             /etc/makepkg.conf
+          # Separate -debug packages double CI time and repository size and are
+          # never useful here.
+          sed -i 's/ debug / !debug /' /etc/makepkg.conf
           grep -m2 -E '^(CFLAGS|CXXFLAGS)=' /etc/makepkg.conf
 
       - name: Import signing key
