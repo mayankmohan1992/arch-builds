@@ -14,7 +14,7 @@ pkgdesc='RandomX CPU+GPU miner, built with -march=znver4 and CUDA support'
 arch=('x86_64')
 url='https://github.com/xmrig/xmrig'
 license=('GPL-3.0-only')
-depends=('gcc-libs' 'glibc' 'openssl' 'cuda')
+depends=('gcc-libs' 'glibc' 'hwloc' 'libuv' 'openssl' 'cuda')
 makedepends=('git' 'cmake')
 provides=('xmrig')
 conflicts=('xmrig' 'xmrig-cuda')
