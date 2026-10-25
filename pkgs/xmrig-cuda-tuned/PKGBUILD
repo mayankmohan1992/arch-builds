@@ -33,10 +33,20 @@ prepare() {
 }
 
 build() {
+  # A build host has no GPU driver, so libcuda.so only exists as the toolkit's
+  # stub. Linking against it is correct: the resulting binary records a
+  # DT_NEEDED on libcuda.so.1, which the real driver provides at runtime.
+  local cuda_args=()
+  if [[ -f /opt/cuda/lib64/stubs/libcuda.so ]]; then
+    cuda_args+=(-DCUDA_TOOLKIT_ROOT_DIR=/opt/cuda
+                -DCUDA_CUDA_LIBRARY=/opt/cuda/lib64/stubs/libcuda.so)
+  fi
+
   # --- CUDA plugin (RandomX kernels for NVIDIA) ---
   cmake -S "xmrig-cuda-$_cudaver" -B build-cuda \
     -DCMAKE_BUILD_TYPE=Release \
     -DCUDA_ARCH=120 \
+    "${cuda_args[@]}" \
     -DWITH_RANDOMX=ON -DWITH_CN_LITE=OFF -DWITH_CN_HEAVY=OFF \
     -DWITH_CN_PICO=OFF -DWITH_CN_FEMTO=OFF -DWITH_KAWPOW=OFF \
     -DWITH_CN_R=OFF -DWITH_ARGON2=OFF
