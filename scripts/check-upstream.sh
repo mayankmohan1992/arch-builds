@@ -1,54 +1,72 @@
 #!/usr/bin/env bash
-# Report when an upstream project has a newer release than the PKGBUILD pins.
+# Runs from a systemd user timer. Compares the versions published in the
+# mayank-v4 repository against what Arch currently ships, and dispatches a
+# GitHub Actions build only for packages that are missing or behind.
 #
-# Report-only on purpose: the xmrig-cuda clockRate patch has to keep applying
-# across upstream releases, so a bump should be reviewed and tested rather than
-# committed by a timer.
-#
-# Exit status: 0 = everything current, 1 = at least one package is behind.
+# Deliberately NOT a GitHub `schedule:` workflow: GitHub disables scheduled
+# workflows in public repositories after 60 days without repository activity.
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+REPO="mayankmohan1992/arch-builds"
+TAG="mayank-v4"
+STATE_URL="https://github.com/$REPO/releases/download/$TAG/state.json"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}"
+LOG="$STATE_DIR/arch-builds.log"
+MANAGED="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/packages.txt"
 
-latest_tag() { # latest_tag <owner/repo>
-  local tag
-  tag=$(curl -sfL "https://api.github.com/repos/$1/releases/latest" |
-        python3 -c 'import json,sys; print(json.load(sys.stdin).get("tag_name",""))' 2>/dev/null) || tag=""
-  printf '%s' "${tag#v}"
-}
+mkdir -p "$STATE_DIR"
+log() { printf '%s %s\n' "$(date -Is)" "$*" | tee -a "$LOG"; }
 
-pkgbuild_var() { # pkgbuild_var <file> <name>
-  sed -n "s/^$2=//p" "$1" | tr -d "'\"" | head -1
-}
+if ! command -v gh >/dev/null; then log "gh missing"; exit 1; fi
+if ! gh auth status >/dev/null 2>&1; then log "gh not authenticated"; exit 1; fi
 
-behind=0
-printf '%-22s %-12s %-12s %s\n' PACKAGE PINNED UPSTREAM STATUS
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
 
-file=pkgs/xmrig-cuda-tuned/PKGBUILD
-pinned=$(pkgbuild_var "$file" pkgver)
-up=$(latest_tag xmrig/xmrig)
-if [[ -n $up && $up != "$pinned" ]]; then
-  printf '%-22s %-12s %-12s %s\n' xmrig "$pinned" "$up" "behind"
-  behind=1
-else
-  printf '%-22s %-12s %-12s %s\n' xmrig "$pinned" "${up:-unknown}" ok
+curl -sfL "$STATE_URL" -o "$tmp/state.json" 2>/dev/null || echo '{}' >"$tmp/state.json"
+
+need=()
+lookup_failed=0
+while read -r pkg; do
+  [[ -z $pkg || $pkg == \#* ]] && continue
+  # vendored recipes (pkgs/<name>) have their own upstream tracking
+  [[ -d "$(dirname "$MANAGED")/pkgs/$pkg" ]] && continue
+
+  if ! curl -sfL "https://archlinux.org/packages/search/json/?name=$pkg" -o "$tmp/$pkg.json"; then
+    log "$pkg: upstream lookup failed; leaving it alone"
+    lookup_failed=1
+    continue
+  fi
+  upstream=$(python3 -c 'import json,sys
+r = (json.load(open(sys.argv[1])).get("results") or [{}])[0]
+print("{}-{}".format(r.get("pkgver", ""), r.get("pkgrel", "")))' "$tmp/$pkg.json" 2>/dev/null) || upstream=""
+  if [[ -z $upstream || $upstream == "-" ]]; then
+    log "$pkg: could not parse upstream version"
+    lookup_failed=1
+    continue
+  fi
+
+  # CI publishes <pkgver>-<pkgrel>.1
+  published=$(python3 -c 'import json,sys
+state=json.load(open(sys.argv[1]))
+print(state.get(sys.argv[2],""))' "$tmp/state.json" "$pkg")
+  expected="$upstream.1"
+
+  if [[ $published != "$expected" ]]; then
+    log "$pkg: published=${published:-none} upstream=$upstream -> queue"
+    need+=("$pkg")
+  fi
+done <"$MANAGED"
+
+if (( ${#need[@]} == 0 )); then
+  if (( lookup_failed )); then
+    log "some upstream lookups failed; not dispatching"
+  else
+    log "all managed packages current"
+  fi
+  exit 0
 fi
 
-pinned=$(pkgbuild_var "$file" _cudaver)
-up=$(latest_tag xmrig/xmrig-cuda)
-if [[ -n $up && $up != "$pinned" ]]; then
-  printf '%-22s %-12s %-12s %s\n' xmrig-cuda "$pinned" "$up" "behind"
-  behind=1
-else
-  printf '%-22s %-12s %-12s %s\n' xmrig-cuda "$pinned" "${up:-unknown}" ok
-fi
-
-if (( behind )); then
-  echo
-  echo "Bump pkgver/_cudaver, refresh sha256sums, rebuild locally once to prove"
-  echo "the patch still applies, then push to trigger the CI build."
-  exit 1
-fi
-
-echo
-echo "All packages match upstream."
+log "dispatching build: ${need[*]}"
+gh workflow run build.yml --repo "$REPO" -f pkgs="${need[*]}" >>"$LOG" 2>&1
+log "dispatched"

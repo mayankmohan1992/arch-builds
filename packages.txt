@@ -1,0 +1,11 @@
+# Managed set: Arch packages rebuilt with -march=znver4 by GitHub Actions.
+# Only packages ALHP does not cover, and that fit a 14 GB / 6 h runner.
+git
+vim
+nodejs
+python
+graphviz
+starship
+tldr
+usage
+semver

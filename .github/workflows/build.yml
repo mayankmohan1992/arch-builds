@@ -1,28 +1,29 @@
-name: build-package
+name: build-packages
 
-# Builds one PKGBUILD from pkgs/<name> on an Arch container, signs it, rebuilds
-# the pacman database and publishes everything to the "mayank-v4" release.
+# Builds packages on an Arch container, signs them, and publishes them to the
+# "mayank-v4" release which pacman consumes.
 #
-# Free-tier constraints this respects:
+# Free-tier constraints respected here:
 #   * public repo  -> standard runners are free and unlimited
-#   * releases     -> no total size or bandwidth limit, 2 GiB per asset
-#   * 14 GB SSD    -> no Chromium-scale trees; small/medium packages only
-#   * 6 h job cap  -> kept well under it
-#
-# Artifacts are deliberately NOT used: the free plan caps artifact storage at
-# 500 MB, while release assets are free for public repositories.
+#   * releases     -> free for public repos; no total size/bandwidth limit
+#   * artifacts    -> NOT used (free plan caps them at 500 MB)
+#   * runner       -> 4 vCPU / 16 GB RAM / 14 GB SSD, 6 h job cap
+#   * no schedule: -> GitHub disables scheduled workflows in public repos after
+#                     60 days of inactivity; a local timer dispatches instead.
 
 on:
   workflow_dispatch:
     inputs:
-      pkg:
-        description: "Package directory under pkgs/"
-        required: true
-        default: "xmrig-cuda-tuned"
+      pkgs:
+        description: "Optional space-separated package override (blank = packages.txt)"
+        required: false
+        default: ""
   push:
     branches: [main]
     paths:
       - "pkgs/**"
+      - "scripts/ci-build.sh"
+      - "packages.txt"
       - ".github/workflows/build.yml"
 
 permissions:
@@ -34,6 +35,7 @@ concurrency:
 
 env:
   REPO_NAME: mayank-v4
+  GH_REPO: ${{ github.repository }}
 
 jobs:
   build:
@@ -45,13 +47,12 @@ jobs:
 
       - name: Prepare builder
         run: |
-          pacman -Syu --noconfirm --needed git github-cli gnupg sudo
+          pacman -Syu --noconfirm --needed git github-cli gnupg sudo curl python
           useradd -m builder
           echo 'builder ALL=(ALL) NOPASSWD: ALL' >/etc/sudoers.d/builder
           chown -R builder:builder "$GITHUB_WORKSPACE"
-          # Keep every stock Arch setting, override only the target CPU. Using
-          # the system config means we inherit hardening flags and defaults
-          # instead of maintaining a fragile copy.
+          # Keep every stock Arch setting and override only the target CPU, so
+          # hardening flags and defaults stay identical to the official build.
           sed -z -i \
             's/CFLAGS="[^"]*"/CFLAGS="-march=znver4 -O3 -pipe -fno-plt -fexceptions -Wp,-D_FORTIFY_SOURCE=3 -Wformat -Werror=format-security -fstack-clash-protection -fcf-protection -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer"/' \
             /etc/makepkg.conf
@@ -73,59 +74,12 @@ jobs:
           KEYID=$(awk -F: '/^fpr:/{print $10; exit}' /tmp/keys.txt)
           test -n "$KEYID"
           echo "KEYID=$KEYID" >>"$GITHUB_ENV"
-          echo "Signing with $KEYID"
+          echo "signing with $KEYID"
 
-      - name: Build package
-        run: |
-          pkg="${{ inputs.pkg || 'xmrig-cuda-tuned' }}"
-          test -d "pkgs/$pkg"
-          runuser -u builder -- env \
-            PKGDEST="$GITHUB_WORKSPACE/out" \
-            SRCDEST="$GITHUB_WORKSPACE/srcdest" \
-            RUSTFLAGS="-C target-cpu=znver4" \
-            CARGO_BUILD_JOBS="$(nproc)" \
-            bash -c "cd '$GITHUB_WORKSPACE/pkgs/$pkg' && makepkg -s --noconfirm --cleanbuild --sign --key '$KEYID'"
-          ls -la "$GITHUB_WORKSPACE/out"
-
-      - name: Assemble repository
+      - name: Build and publish
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
+          PKGS: ${{ inputs.pkgs }}
         run: |
           chown -R builder:builder "$GITHUB_WORKSPACE"
-          # Runs as builder: repo-add signs with the key imported into that
-          # user's GnuPG home, and gnupg refuses a homedir owned by someone else.
-          runuser -u builder -- bash -s <<'EOS'
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE"
-          mkdir -p repo
-          # The runner is ephemeral, so the existing database and packages are
-          # pulled back from the release first. Without this each build would
-          # publish a database containing only its own package.
-          gh release download "$REPO_NAME" --repo "$GH_REPO" --dir repo --skip-existing || true
-          cp out/*.pkg.tar.zst repo/
-          cp out/*.pkg.tar.zst.sig repo/ 2>/dev/null || true
-          cd repo
-          repo-add --sign --key "$KEYID" "$REPO_NAME.db.tar.gz" ./*.pkg.tar.zst
-          # pacman requests <repo>.db by name, but repo-add leaves a symlink to
-          # the tarball; dereference it so the uploaded asset is the real file.
-          for f in "$REPO_NAME.db" "$REPO_NAME.files"; do
-            [ -L "$f" ] && { cp -L "$f" "$f.real" && mv -f "$f.real" "$f"; }
-          done
-          rm -f "$REPO_NAME.db.tar.gz" "$REPO_NAME.files.tar.gz"
-          ls -la
-          EOS
-
-      - name: Publish to release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          runuser -u builder -- bash -s <<'EOS'
-          set -euo pipefail
-          gh release view "$REPO_NAME" --repo "$GH_REPO" >/dev/null 2>&1 ||
-            gh release create "$REPO_NAME" --repo "$GH_REPO" \
-              --title "mayank-v4 pacman repository" \
-              --notes "Signed x86-64-v4 packages built by GitHub Actions. Add with the mayank-v4 repo stanza; pacman pulls updates through omarchy update."
-          gh release upload "$REPO_NAME" repo/* --repo "$GH_REPO" --clobber
-          EOS
+          runuser -u builder -- bash -c 'cd "$GITHUB_WORKSPACE" && ./scripts/ci-build.sh'

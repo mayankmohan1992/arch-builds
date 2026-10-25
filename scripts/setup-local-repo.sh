@@ -69,3 +69,30 @@ pacman -Sy
 echo
 echo "Packages available from $REPO:"
 pacman -Sl "$REPO" || true
+
+# --- ALHP multilib v4 -------------------------------------------------------
+# 44 of this machine's lib32-* packages are already built for x86-64-v4 in
+# ALHP's multilib repository, which is not enabled by the ALHP guide's default
+# two-repo stanza.
+if [[ -f /etc/pacman.d/alhp-mirrorlist ]] && ! grep -q '^\[multilib-x86-64-v4\]' "$CONF"; then
+  echo "==> enabling ALHP multilib-x86-64-v4"
+  cp -a "$CONF" "$CONF.pre-alhp-multilib-$(date +%Y%m%d-%H%M%S)"
+  tmp=$(mktemp)
+  awk '
+    /^\[multilib\]$/ && !done {
+      print "[multilib-x86-64-v4]"
+      print "Include = /etc/pacman.d/alhp-mirrorlist"
+      print ""
+      done = 1
+    }
+    { print }
+  ' "$CONF" >"$tmp"
+  if grep -q '^\[multilib-x86-64-v4\]' "$tmp"; then
+    install -m644 "$tmp" "$CONF"
+    rm -f "$tmp"
+    pacman -Sy
+  else
+    rm -f "$tmp"
+    echo "no [multilib] section found; skipped" >&2
+  fi
+fi
