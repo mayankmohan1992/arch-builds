@@ -5,7 +5,6 @@
 # gain would be -march (~3-8%), and its PGO profile step needs a generated
 # en_US.UTF-8 locale. Not worth replacing the system interpreter for that.
 git
-vim
 nodejs
 graphviz
 starship

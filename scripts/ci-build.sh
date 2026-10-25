@@ -66,6 +66,18 @@ for pkg in $PKGS; do
     awk -F' = ' '/^\tpkgver/{v=$2} /^\tpkgrel/{r=$2} END{print v, r}')
   echo "building $pkg $pv-$pr"
 
+  # Idempotent: a push or a re-dispatch must not rebuild packages that are
+  # already published at this exact version.
+  if [[ $(python3 -c 'import json,sys
+try: print(json.load(open(sys.argv[1])).get(sys.argv[2],""))
+except Exception: print("")' repo/state.json "$pkg") == "$pv-$pr" ]]; then
+    if compgen -G "repo/${pkg}-${pv}-${pr}-*.pkg.tar.zst" >/dev/null; then
+      echo "$pkg $pv-$pr already published; skipping"
+      echo "::endgroup::"
+      continue
+    fi
+  fi
+
   # Arch's recipes verify upstream release signatures, and a fresh container
   # has an empty keyring. Import every key the recipe declares so makepkg can
   # actually validate the sources instead of us disabling the check.
