@@ -38,8 +38,10 @@ build() {
   # DT_NEEDED on libcuda.so.1, which the real driver provides at runtime.
   local cuda_args=()
   if [[ -f /opt/cuda/lib64/stubs/libcuda.so ]]; then
+    # xmrig-cuda uses a plain find_library(CUDA_LIB ...), not FindCUDA's
+    # variables, so the cache entry must be set directly.
     cuda_args+=(-DCUDA_TOOLKIT_ROOT_DIR=/opt/cuda
-                -DCUDA_CUDA_LIBRARY=/opt/cuda/lib64/stubs/libcuda.so)
+                -DCUDA_LIB=/opt/cuda/lib64/stubs/libcuda.so)
   fi
 
   # --- CUDA plugin (RandomX kernels for NVIDIA) ---
