@@ -122,4 +122,15 @@ PY
 done
 
 echo "built:$built"
+
+# Always republish once at the end, even when every package was skipped, so the
+# database always matches the assets actually present (this is what drops
+# packages that were deleted from the release). Guarded so an empty repo dir
+# cannot produce an empty database.
+if compgen -G "repo/*.pkg.tar.zst" >/dev/null; then
+  ( cd repo && rm -f "$REPO_NAME.db"* "$REPO_NAME.files"* &&
+    repo-add --sign --key "$KEYID" "$REPO_NAME.db.tar.gz" ./*.pkg.tar.zst >/dev/null )
+  publish
+fi
+
 (( fail == 0 )) || { echo "::error::one or more packages failed"; exit 1; }
