@@ -90,12 +90,19 @@ jobs:
       - name: Assemble repository
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          # Runs as builder: repo-add signs with the key imported into that
+          # user's GnuPG home, and gnupg refuses a homedir owned by someone else.
+          runuser -u builder -- bash -s <<'EOS'
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
           mkdir -p repo
           # The runner is ephemeral, so the existing database and packages are
           # pulled back from the release first. Without this each build would
           # publish a database containing only its own package.
-          gh release download "$REPO_NAME" --dir repo --skip-existing || true
+          gh release download "$REPO_NAME" --repo "$GH_REPO" --dir repo --skip-existing || true
           cp out/*.pkg.tar.zst repo/
           cp out/*.pkg.tar.zst.sig repo/ 2>/dev/null || true
           cd repo
@@ -107,13 +114,18 @@ jobs:
           done
           rm -f "$REPO_NAME.db.tar.gz" "$REPO_NAME.files.tar.gz"
           ls -la
+          EOS
 
       - name: Publish to release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          gh release view "$REPO_NAME" >/dev/null 2>&1 ||
-            gh release create "$REPO_NAME" \
+          runuser -u builder -- bash -s <<'EOS'
+          set -euo pipefail
+          gh release view "$REPO_NAME" --repo "$GH_REPO" >/dev/null 2>&1 ||
+            gh release create "$REPO_NAME" --repo "$GH_REPO" \
               --title "mayank-v4 pacman repository" \
               --notes "Signed x86-64-v4 packages built by GitHub Actions. Add with the mayank-v4 repo stanza; pacman pulls updates through omarchy update."
-          gh release upload "$REPO_NAME" repo/* --clobber
+          gh release upload "$REPO_NAME" repo/* --repo "$GH_REPO" --clobber
+          EOS
