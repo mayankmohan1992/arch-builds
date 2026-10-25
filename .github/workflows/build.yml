@@ -53,16 +53,28 @@ jobs:
           chown -R builder:builder "$GITHUB_WORKSPACE"
           # Keep every stock Arch setting and override only the target CPU, so
           # hardening flags and defaults stay identical to the official build.
+          # Notes on the flag choice for Zen 4 (Ryzen 5 7600):
+          #   -march=znver4    enables AVX-512F/BW/DQ/VL, VBMI2, VNNI, BF16, VAES,
+          #                    GFNI, SHA-NI, BMI2 - every feature this CPU reports
+          #   -mtune=znver4    implies 256-bit vector preference (GCC's tuning
+          #                    choice for Zen 4), which avoids AVX-512 downclocking
+          #   -falign-functions=32  matches Zen 4's 32-byte fetch/decode window
+          #   LTO stays on (OPTIONS=lto + LTOFLAGS below)
+          # Frame pointers are kept: -fomit-frame-pointer would gain ~1-2% but
+          # makes crash/backtrace analysis worse.
           sed -z -i \
-            's/CFLAGS="[^"]*"/CFLAGS="-march=znver4 -O3 -pipe -fno-plt -fexceptions -Wp,-D_FORTIFY_SOURCE=3 -Wformat -Werror=format-security -fstack-clash-protection -fcf-protection -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer"/' \
+            's/CFLAGS="[^"]*"/CFLAGS="-march=znver4 -mtune=znver4 -O3 -pipe -fno-plt -fexceptions -Wp,-D_FORTIFY_SOURCE=3 -Wformat -Werror=format-security -fstack-clash-protection -fcf-protection -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer -falign-functions=32"/' \
             /etc/makepkg.conf
           sed -z -i \
             's/CXXFLAGS="[^"]*"/CXXFLAGS="$CFLAGS -Wp,-D_GLIBCXX_ASSERTIONS"/' \
             /etc/makepkg.conf
+          sed -z -i \
+            's/LTOFLAGS="[^"]*"/LTOFLAGS="-flto=auto -falign-functions=32"/' \
+            /etc/makepkg.conf
           # Separate -debug packages double CI time and repository size and are
           # never useful here.
           sed -i 's/ debug / !debug /' /etc/makepkg.conf
-          grep -m2 -E '^(CFLAGS|CXXFLAGS)=' /etc/makepkg.conf
+          grep -m3 -E '^(CFLAGS|CXXFLAGS|LTOFLAGS)=' /etc/makepkg.conf
 
       - name: Import signing key
         env:

@@ -1,9 +1,8 @@
-# Managed set: Arch packages rebuilt with -march=znver4 by GitHub Actions.
-# Only packages ALHP does not cover and that fit a 14 GB / 6 h runner.
-#
-# python is deliberately absent: Arch already builds it with PGO+LTO, our only
-# gain would be -march (~3-8%), and its PGO profile step needs a generated
-# en_US.UTF-8 locale. Not worth replacing the system interpreter for that.
+# Managed set: Arch pkgbases rebuilt with -march=znver4 by GitHub Actions.
+# Only packages ALHP does not cover, that fit a 14 GB / 6 h runner, and that are
+# safe to replace. One entry per PKGBUILD (split packages are built together).
+
+# --- Tier 1: applications and tools -----------------------------------------
 git
 nodejs
 graphviz
@@ -11,3 +10,46 @@ starship
 tldr
 usage
 semver
+
+# --- Tier 2: libraries and daemons ------------------------------------------
+# Same source, same pkgver as Arch, so the ABI is unchanged; pkgrel gains .1 so
+# pacman prefers the v4 build. Any upstream rebuild wins again automatically.
+libpng
+libjpeg-turbo
+libuv
+librsvg
+fontconfig
+gd
+graphite
+libsamplerate
+liblqr
+libasyncns
+libebur128
+slang
+libcloudproviders
+libchewing
+gstreamer
+gst-plugins-base
+gst-plugins-bad
+bluez
+gcr
+gcr-4
+fwupd
+kirigami
+ruby
+
+# --- Deliberately excluded ---------------------------------------------------
+# System-breaking: glibc, gcc/gcc-libs, binutils, base, filesystem,
+#   linux-firmware/*, keyrings, pacman-mirrorlist, the kernel. ALHP excludes
+#   them too; -O3/LTO there risks the whole system for ~1-3%.
+# Deep system libs (glib2, curl, sqlite, zlib, nettle, libseccomp...): same
+#   reason, and they are rebuilt constantly by Arch.
+# Chromium-scale, exceeds 14 GB disk or 6 h job: chromium, webkit2gtk-4.1,
+#   qt6-webengine, opencv, js140, rust, deno.
+# Proprietary/prebuilt: nvidia-utils, opencl-nvidia, nvidia-open-dkms, cuda,
+#   electron43, electron44.
+# No compiled code worth rebuilding: fonts, icon themes, data packages,
+#   pure-Python/JS packages, shell scripts (yt-dlp, udiskie, ufw, npm, ...).
+# Omarchy-owned: excluded by decision, their channel owns them.
+# python: Arch already builds it PGO+LTO; gain is ~3% on an interpreter the hot
+#   apps do not use, and its PGO profile step needs a generated locale.

@@ -115,6 +115,9 @@ PY
   rm -f out/*
   publish
   built="$built $pkg"
+  # Bound disk use on the 14 GB runner: source tarballs are re-fetched per
+  # package rather than accumulated across ~30 builds.
+  rm -rf srcdest
   echo "::endgroup::"
 done
 
