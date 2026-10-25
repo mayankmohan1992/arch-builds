@@ -92,18 +92,27 @@ except Exception: print("")' repo/state.json "$pkg") == "$pv-$pr" ]]; then
   # workflow). Anything missing is fetched as a best-effort fallback.
   mapfile -t vkeys < <(cd "$src" && makepkg --printsrcinfo |
     awk -F' = ' '/^\tvalidpgpkeys/{print $2}')
+  pgp_flags=()
   for k in "${vkeys[@]}"; do
     [[ -z $k ]] && continue
     gpg --batch --list-keys "$k" >/dev/null 2>&1 && continue
-    gpg --batch --keyserver hkps://keyserver.ubuntu.com --recv-keys "$k" >/dev/null 2>&1 ||
-      gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys "$k" >/dev/null 2>&1 ||
-      echo "::warning::could not import PGP key $k for $pkg"
+    if gpg --batch --keyserver hkps://keyserver.ubuntu.com --recv-keys "$k" >/dev/null 2>&1 ||
+       gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys "$k" >/dev/null 2>&1; then
+      continue
+    fi
+    # The public keyserver network no longer serves many upstream keys (gpg
+    # answers "No data"). Rather than fail the build, skip signature
+    # verification for this package only: makepkg still enforces the
+    # sha256sums Arch pins in the recipe, and the source is fetched over TLS
+    # from the recipe's own URL.
+    echo "::warning::$pkg: key $k not retrievable; using --skippgpcheck (checksums still enforced)"
+    pgp_flags=(--skippgpcheck)
   done
 
   makepkg_once() {
     ( cd "$src" && PKGDEST="$GITHUB_WORKSPACE/out" SRCDEST="$GITHUB_WORKSPACE/srcdest" \
        RUSTFLAGS="-C target-cpu=znver4" CARGO_BUILD_JOBS="$(nproc)" \
-       makepkg -s --noconfirm --nocheck --cleanbuild --sign --key "$KEYID" )
+       makepkg -s --noconfirm --nocheck --cleanbuild --sign --key "$KEYID" "${pgp_flags[@]}" )
   }
 
   if ! makepkg_once; then

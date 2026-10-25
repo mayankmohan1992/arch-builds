@@ -35,8 +35,6 @@ bluez
 gcr
 gcr-4
 fwupd
-kirigami
-ruby
 
 # --- Deliberately excluded ---------------------------------------------------
 # System-breaking: glibc, gcc/gcc-libs, binutils, base, filesystem,
@@ -57,3 +55,11 @@ ruby
 # libasyncns: dropped. Upstream's git host (git.0pointer.net) serves a cert
 # that fails hostname validation, so the source cannot be fetched reliably.
 # It is a tiny, effectively deprecated library with no meaningful gain.
+
+# kirigami: dropped. KDE re-uploaded the 6.31.0 tarball after Arch packaged it
+# (actual sha256 811a8a15... vs Arch's f21df727...), so the recipe fails its
+# own checksum. Not worth trusting a re-tagged upstream artifact.
+# ruby: dropped. Its build executes the freshly compiled miniruby, and GitHub's
+# standard runners are AMD EPYC (Zen 3, no AVX-512), so a znver4 binary SIGILLs
+# ("Illegal instruction (core dumped)"). Packages that run their own output
+# during the build cannot be v4-built on this infrastructure.
