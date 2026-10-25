@@ -3,3 +3,19 @@ repo/
 srcdest/
 *.pkg.tar.zst
 *.pkg.tar.zst.sig
+
+# Secrets and local credentials - never commit these
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa*
+id_ed25519*
+.npmrc
+.pypirc
+.netrc
