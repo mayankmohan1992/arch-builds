@@ -85,6 +85,13 @@ jobs:
           chown builder /tmp/key.asc
           runuser -u builder -- gpg --batch --import /tmp/key.asc
           rm -f /tmp/key.asc
+          # Arch's own packager keyring, so upstream source signatures verify
+          # offline. Importing keys per-recipe from HKP keyservers is flaky
+          # (libpng, fontconfig, libchewing and libcloudproviders all failed
+          # that way), and gpg verify only needs the public key present.
+          if [[ -f /usr/share/pacman/keyrings/archlinux.gpg ]]; then
+            runuser -u builder -- gpg --batch --import /usr/share/pacman/keyrings/archlinux.gpg
+          fi
           runuser -u builder -- gpg --list-secret-keys --with-colons >/tmp/keys.txt
           KEYID=$(awk -F: '/^fpr:/{print $10; exit}' /tmp/keys.txt)
           test -n "$KEYID"

@@ -57,6 +57,16 @@ for pkg in $PKGS; do
       echo "::error::no packaging source for $pkg"
       fail=1; echo "::endgroup::"; continue
     fi
+    # Some packaging repositories nest the recipe one level deeper.
+    if [[ ! -f $src/PKGBUILD ]]; then
+      inner=$(find "$src" -maxdepth 2 -type f -name PKGBUILD -printf '%h\n' 2>/dev/null | head -1)
+      if [[ -n $inner ]]; then
+        src=$inner
+      else
+        echo "::error::$pkg has no PKGBUILD (stub package? see packages.txt)"
+        fail=1; echo "::endgroup::"; continue
+      fi
+    fi
   fi
 
   # "1" -> "1.1" so our build beats stock; an already-suffixed pkgrel is kept
@@ -78,23 +88,33 @@ except Exception: print("")' repo/state.json "$pkg") == "$pv-$pr" ]]; then
     fi
   fi
 
-  # Arch's recipes verify upstream release signatures, and a fresh container
-  # has an empty keyring. Import every key the recipe declares so makepkg can
-  # actually validate the sources instead of us disabling the check.
+  # Most upstream keys now come from Arch's packager keyring (imported by the
+  # workflow). Anything missing is fetched as a best-effort fallback.
   mapfile -t vkeys < <(cd "$src" && makepkg --printsrcinfo |
     awk -F' = ' '/^\tvalidpgpkeys/{print $2}')
   for k in "${vkeys[@]}"; do
     [[ -z $k ]] && continue
+    gpg --batch --list-keys "$k" >/dev/null 2>&1 && continue
     gpg --batch --keyserver hkps://keyserver.ubuntu.com --recv-keys "$k" >/dev/null 2>&1 ||
       gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys "$k" >/dev/null 2>&1 ||
       echo "::warning::could not import PGP key $k for $pkg"
   done
 
-  if ! ( cd "$src" && PKGDEST="$GITHUB_WORKSPACE/out" SRCDEST="$GITHUB_WORKSPACE/srcdest" \
-         RUSTFLAGS="-C target-cpu=znver4" CARGO_BUILD_JOBS="$(nproc)" \
-         makepkg -s --noconfirm --nocheck --cleanbuild --sign --key "$KEYID" ); then
-    echo "::error::build failed: $pkg"
-    fail=1; echo "::endgroup::"; continue
+  makepkg_once() {
+    ( cd "$src" && PKGDEST="$GITHUB_WORKSPACE/out" SRCDEST="$GITHUB_WORKSPACE/srcdest" \
+       RUSTFLAGS="-C target-cpu=znver4" CARGO_BUILD_JOBS="$(nproc)" \
+       makepkg -s --noconfirm --nocheck --cleanbuild --sign --key "$KEYID" )
+  }
+
+  if ! makepkg_once; then
+    # Truncated downloads, flaky upstream TLS and keyserver hiccups are the
+    # usual causes; one clean retry costs little and saves the whole run.
+    echo "::warning::first attempt failed for $pkg; retrying once"
+    rm -f "$GITHUB_WORKSPACE"/out/*
+    if ! makepkg_once; then
+      echo "::error::build failed: $pkg"
+      fail=1; echo "::endgroup::"; continue
+    fi
   fi
 
   cp out/*.pkg.tar.zst repo/

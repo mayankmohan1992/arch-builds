@@ -23,14 +23,14 @@ gd
 graphite
 libsamplerate
 liblqr
-libasyncns
 libebur128
 slang
 libcloudproviders
 libchewing
+# gstreamer's pkgbase builds the entire stack (base/good/bad/ugly/libav/
+# devtools/rtsp-server); gst-plugins-* repos in Arch's packaging tree are
+# README-only stubs and fail with "PKGBUILD does not exist".
 gstreamer
-gst-plugins-base
-gst-plugins-bad
 bluez
 gcr
 gcr-4
@@ -53,3 +53,7 @@ ruby
 # Omarchy-owned: excluded by decision, their channel owns them.
 # python: Arch already builds it PGO+LTO; gain is ~3% on an interpreter the hot
 #   apps do not use, and its PGO profile step needs a generated locale.
+
+# libasyncns: dropped. Upstream's git host (git.0pointer.net) serves a cert
+# that fails hostname validation, so the source cannot be fetched reliably.
+# It is a tiny, effectively deprecated library with no meaningful gain.
