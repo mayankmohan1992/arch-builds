@@ -25,7 +25,6 @@ libsamplerate
 liblqr
 libebur128
 slang
-libcloudproviders
 libchewing
 # gstreamer's pkgbase builds the entire stack (base/good/bad/ugly/libav/
 # devtools/rtsp-server); gst-plugins-* repos in Arch's packaging tree are
@@ -63,3 +62,8 @@ fwupd
 # standard runners are AMD EPYC (Zen 3, no AVX-512), so a znver4 binary SIGILLs
 # ("Illegal instruction (core dumped)"). Packages that run their own output
 # during the build cannot be v4-built on this infrastructure.
+
+# libcloudproviders: dropped, same class as ruby. Its build runs
+# gobject-introspection against the freshly compiled v4 library, which SIGILLs
+# on GitHub's Zen 3 runners. Any package that executes its own output during
+# the build cannot be v4-built here.

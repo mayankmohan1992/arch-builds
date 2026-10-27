@@ -18,6 +18,10 @@ on:
         description: "Optional space-separated package override (blank = packages.txt)"
         required: false
         default: ""
+      force:
+        description: "Rebuild even if already published (bumps pkgrel)"
+        required: false
+        default: "0"
   push:
     branches: [main]
     paths:
@@ -102,6 +106,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PKGS: ${{ inputs.pkgs }}
+          FORCE: ${{ inputs.force }}
         run: |
           chown -R builder:builder "$GITHUB_WORKSPACE"
           runuser -u builder -- bash -c 'cd "$GITHUB_WORKSPACE" && ./scripts/ci-build.sh'

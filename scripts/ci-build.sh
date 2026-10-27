@@ -46,10 +46,44 @@ regenerate_db() {
 # removing the old asset first avoids both the race and the API churn.
 upload_one() {
   local file=$1
-  [[ -f $file ]] || return 0
+  [[ -f $file ]] || { echo "::error::missing upload file $file"; return 1; }
   gh release delete-asset "$REPO_NAME" "$(basename "$file")" \
     --repo "$GH_REPO" --yes >/dev/null 2>&1 || true
-  gh release upload "$REPO_NAME" "$file" --repo "$GH_REPO"
+  if ! gh release upload "$REPO_NAME" "$file" --repo "$GH_REPO"; then
+    echo "::error::upload failed for $(basename "$file")"
+    return 1
+  fi
+}
+
+# A package and its signature are separate assets, so a failed upload of one
+# leaves a mismatched pair that breaks every client's transaction with
+# "signature is invalid". Verify what actually landed, and repair once.
+verify_published() { # verify_published <pkg.tar.zst>
+  local pkgfile=$1 name dir attempt rc
+  name=$(basename "$pkgfile")
+  for attempt in 1 2; do
+    dir=$(mktemp -d)
+    gh release download "$REPO_NAME" --repo "$GH_REPO" --pattern "$name" --dir "$dir" >/dev/null 2>&1
+    gh release download "$REPO_NAME" --repo "$GH_REPO" --pattern "$name.sig" --dir "$dir" >/dev/null 2>&1
+    gpg --verify "$dir/$name.sig" "$dir/$name" >/dev/null 2>&1
+    rc=$?
+    rm -rf "$dir"
+    (( rc == 0 )) && return 0
+    (( attempt == 1 )) || break
+    echo "::warning::$name signature mismatch after upload; re-uploading the pair"
+    upload_one "repo/$name" || true
+    [[ -f repo/$name.sig ]] && upload_one "repo/$name.sig" || true
+  done
+  echo "::error::$name is published with an invalid signature"
+  return 1
+}
+
+state_version() { # state_version <pkg>
+  python3 -c 'import json,sys
+try:
+    print(json.load(open(sys.argv[1])).get(sys.argv[2],""))
+except Exception:
+    print("")' repo/state.json "$1"
 }
 
 ensure_release() {
@@ -60,13 +94,13 @@ ensure_release() {
 }
 
 publish() { # publish <changed files...>
-  regenerate_db
-  ensure_release
-  upload_one "repo/$REPO_NAME.db"
-  upload_one "repo/$REPO_NAME.db.sig"
-  upload_one repo/state.json
+  regenerate_db || return 1
+  ensure_release || return 1
+  upload_one "repo/$REPO_NAME.db" || return 1
+  upload_one "repo/$REPO_NAME.db.sig" || return 1
+  upload_one repo/state.json || return 1
   local f
-  for f in "$@"; do upload_one "$f"; done
+  for f in "$@"; do upload_one "$f" || return 1; done
 }
 
 fail=0
@@ -103,15 +137,26 @@ for pkg in $PKGS; do
   echo "building $pkg $pv-$pr"
 
   # Idempotent: a push or a re-dispatch must not rebuild packages that are
-  # already published at this exact version.
-  if [[ $(python3 -c 'import json,sys
-try: print(json.load(open(sys.argv[1])).get(sys.argv[2],""))
-except Exception: print("")' repo/state.json "$pkg") == "$pv-$pr" ]]; then
+  # already published at this exact version. FORCE=1 bypasses this to repair a
+  # bad artifact or refresh a build.
+  if [[ ${FORCE:-0} != 1 ]] && [[ $(state_version "$pkg") == "$pv-$pr" ]]; then
     if compgen -G "repo/${pkg}-${pv}-${pr}-*.pkg.tar.zst" >/dev/null; then
       echo "$pkg $pv-$pr already published; skipping"
       echo "::endgroup::"
       continue
     fi
+  fi
+
+  # Rebuilding a version that was already published would reuse the same
+  # filename with different bytes, and anything holding the old copy in
+  # /var/cache/pacman/pkg would then fail signature verification. Bump the
+  # trailing pkgrel component instead (1.1 -> 1.2), which also makes pacman
+  # treat it as a genuine upgrade.
+  if [[ $(state_version "$pkg") == "$pv-$pr" ]]; then
+    new_pr=$(awk -F. 'BEGIN{OFS="."} { $NF = $NF + 1; print }' <<<"$pr")
+    sed -i -E "s/^pkgrel=.*/pkgrel=$new_pr/" "$src/PKGBUILD"
+    echo "republishing $pkg: pkgrel $pr -> $new_pr"
+    pr=$new_pr
   fi
 
   # Most upstream keys now come from Arch's packager keyring (imported by the
@@ -173,7 +218,31 @@ state[pkg] = version
 json.dump(state, open(path, "w"), indent=2, sort_keys=True)
 PY
   rm -f out/*
-  publish "${changed[@]}"
+  if ! publish "${changed[@]}"; then
+    echo "::error::publish failed for $pkg"
+    fail=1; echo "::endgroup::"; continue
+  fi
+  # Confirm the package/signature pair actually landed intact.
+  pkg_ok=1
+  for f in "${changed[@]}"; do
+    case $f in *.pkg.tar.zst) verify_published "$f" || pkg_ok=0 ;; esac
+  done
+  if (( pkg_ok == 0 )); then
+    echo "::error::published artifact failed verification for $pkg; removing it"
+    for f in "${changed[@]}"; do
+      gh release delete-asset "$REPO_NAME" "$(basename "$f")" \
+        --repo "$GH_REPO" --yes >/dev/null 2>&1 || true
+      rm -f "repo/$(basename "$f")"
+    done
+    python3 - "$pkg" <<'PY'
+import json, sys
+path = "repo/state.json"
+state = json.load(open(path))
+state.pop(sys.argv[1], None)
+json.dump(state, open(path, "w"), indent=2, sort_keys=True)
+PY
+    fail=1; echo "::endgroup::"; continue
+  fi
   built="$built $pkg"
   # Bound disk use on the 14 GB runner.
   rm -rf srcdest
