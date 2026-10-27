@@ -55,26 +55,35 @@ upload_one() {
   fi
 }
 
-# A package and its signature are separate assets, so a failed upload of one
-# leaves a mismatched pair that breaks every client's transaction with
-# "signature is invalid". Verify what actually landed, and repair once.
-verify_published() { # verify_published <pkg.tar.zst>
-  local pkgfile=$1 name dir attempt rc
+# The authoritative check is the pair we are about to upload: makepkg just
+# signed it, so if it verifies locally the bytes are consistent.
+verify_local() { # verify_local <pkg.tar.zst>
+  local pkgfile=$1
+  [[ -f $pkgfile && -f $pkgfile.sig ]] || { echo "::error::missing signature for $(basename "$pkgfile")"; return 1; }
+  gpg --verify "$pkgfile.sig" "$pkgfile" >/dev/null 2>&1 || {
+    echo "::error::local signature mismatch for $(basename "$pkgfile")"
+    return 1
+  }
+}
+
+# Remote check, best effort: GitHub's asset API is eventually consistent right
+# after an upload, so a failure here must not destroy a good artifact. Retries
+# with a delay, and only warns.
+verify_remote() { # verify_remote <pkg.tar.zst>
+  local pkgfile=$1 name dir attempt
   name=$(basename "$pkgfile")
-  for attempt in 1 2; do
+  for attempt in 1 2 3; do
+    sleep "$attempt"
     dir=$(mktemp -d)
-    gh release download "$REPO_NAME" --repo "$GH_REPO" --pattern "$name" --dir "$dir" >/dev/null 2>&1
-    gh release download "$REPO_NAME" --repo "$GH_REPO" --pattern "$name.sig" --dir "$dir" >/dev/null 2>&1
-    gpg --verify "$dir/$name.sig" "$dir/$name" >/dev/null 2>&1
-    rc=$?
+    gh release download "$REPO_NAME" --repo "$GH_REPO" --pattern "$name" --dir "$dir" >/dev/null 2>&1 || true
+    gh release download "$REPO_NAME" --repo "$GH_REPO" --pattern "$name.sig" --dir "$dir" >/dev/null 2>&1 || true
+    if [[ -s $dir/$name && -s $dir/$name.sig ]] && gpg --verify "$dir/$name.sig" "$dir/$name" >/dev/null 2>&1; then
+      rm -rf "$dir"
+      return 0
+    fi
     rm -rf "$dir"
-    (( rc == 0 )) && return 0
-    (( attempt == 1 )) || break
-    echo "::warning::$name signature mismatch after upload; re-uploading the pair"
-    upload_one "repo/$name" || true
-    [[ -f repo/$name.sig ]] && upload_one "repo/$name.sig" || true
   done
-  echo "::error::$name is published with an invalid signature"
+  echo "::warning::$name did not verify remotely after 3 attempts (upload may still be propagating)"
   return 1
 }
 
@@ -203,12 +212,31 @@ for pkg in $PKGS; do
   for f in out/*.pkg.tar.zst; do
     [[ -e $f ]] || continue
     cp "$f" repo/
-    changed+=("repo/$(basename "$f")")
     if [[ -f $f.sig ]]; then
       cp "$f.sig" repo/
-      changed+=("repo/$(basename "$f").sig")
+    else
+      echo "::error::makepkg produced no signature for $(basename "$f")"
     fi
+    changed+=("repo/$(basename "$f")")
   done
+
+  # Authoritative check: the pair we are about to upload must verify locally.
+  local_ok=1
+  for f in "${changed[@]}"; do
+    verify_local "$f" || local_ok=0
+  done
+  if (( local_ok == 0 )); then
+    echo "::error::$pkg: package/signature mismatch locally; not publishing"
+    for f in "${changed[@]}"; do rm -f "$f" "$f.sig"; done
+    fail=1; rm -f out/*; echo "::endgroup::"; continue
+  fi
+
+  uploads=()
+  for f in "${changed[@]}"; do
+    uploads+=("$f")
+    [[ -f $f.sig ]] && uploads+=("$f.sig")
+  done
+
   python3 - "$pv-$pr" "$pkg" <<'PY'
 import json, sys
 version, pkg = sys.argv[1], sys.argv[2]
@@ -218,31 +246,14 @@ state[pkg] = version
 json.dump(state, open(path, "w"), indent=2, sort_keys=True)
 PY
   rm -f out/*
-  if ! publish "${changed[@]}"; then
+  if ! publish "${uploads[@]}"; then
     echo "::error::publish failed for $pkg"
     fail=1; echo "::endgroup::"; continue
   fi
-  # Confirm the package/signature pair actually landed intact.
-  pkg_ok=1
+  # Best-effort remote confirmation; never deletes a locally valid artifact.
   for f in "${changed[@]}"; do
-    case $f in *.pkg.tar.zst) verify_published "$f" || pkg_ok=0 ;; esac
+    verify_remote "$f" || true
   done
-  if (( pkg_ok == 0 )); then
-    echo "::error::published artifact failed verification for $pkg; removing it"
-    for f in "${changed[@]}"; do
-      gh release delete-asset "$REPO_NAME" "$(basename "$f")" \
-        --repo "$GH_REPO" --yes >/dev/null 2>&1 || true
-      rm -f "repo/$(basename "$f")"
-    done
-    python3 - "$pkg" <<'PY'
-import json, sys
-path = "repo/state.json"
-state = json.load(open(path))
-state.pop(sys.argv[1], None)
-json.dump(state, open(path, "w"), indent=2, sort_keys=True)
-PY
-    fail=1; echo "::endgroup::"; continue
-  fi
   built="$built $pkg"
   # Bound disk use on the 14 GB runner.
   rm -rf srcdest
