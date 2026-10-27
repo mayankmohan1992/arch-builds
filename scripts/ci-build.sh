@@ -145,24 +145,25 @@ for pkg in $PKGS; do
     awk -F' = ' '/^\tpkgver/{v=$2} /^\tpkgrel/{r=$2} END{print v, r}')
   echo "building $pkg $pv-$pr"
 
-  # Idempotent: a push or a re-dispatch must not rebuild packages that are
-  # already published at this exact version. FORCE=1 bypasses this to repair a
-  # bad artifact or refresh a build.
-  if [[ ${FORCE:-0} != 1 ]] && [[ $(state_version "$pkg") == "$pv-$pr" ]]; then
-    if compgen -G "repo/${pkg}-${pv}-${pr}-*.pkg.tar.zst" >/dev/null; then
-      echo "$pkg $pv-$pr already published; skipping"
-      echo "::endgroup::"
-      continue
-    fi
+  # Idempotent: skip when what is already published is at least as new as what
+  # we would build now. Comparing with vercmp (not equality) is what makes a
+  # bumped pkgrel (1.2 vs computed 1.1) settle instead of rebuilding forever.
+  state_ver=$(state_version "$pkg")
+  computed="$pv-$pr"
+  if [[ ${FORCE:-0} != 1 && -n $state_ver ]] &&
+     (( $(vercmp "$state_ver" "$computed") >= 0 )) &&
+     compgen -G "repo/${pkg}-${pv}-*.pkg.tar.zst" >/dev/null; then
+    echo "$pkg $state_ver already published; skipping"
+    echo "::endgroup::"
+    continue
   fi
 
   # Rebuilding a version that was already published would reuse the same
-  # filename with different bytes, and anything holding the old copy in
-  # /var/cache/pacman/pkg would then fail signature verification. Bump the
-  # trailing pkgrel component instead (1.1 -> 1.2), which also makes pacman
-  # treat it as a genuine upgrade.
-  if [[ $(state_version "$pkg") == "$pv-$pr" ]]; then
-    new_pr=$(awk -F. 'BEGIN{OFS="."} { $NF = $NF + 1; print }' <<<"$pr")
+  # filename with different bytes, and any client holding the old copy in
+  # /var/cache/pacman/pkg would then fail signature verification. Bump past
+  # what is published (1.1 -> 1.2) so the filename and version both change.
+  if [[ -n $state_ver && ${state_ver%%-*} == "$pv" ]]; then
+    new_pr=$(awk -F. 'BEGIN{OFS="."} { $NF = $NF + 1; print }' <<<"${state_ver##*-}")
     sed -i -E "s/^pkgrel=.*/pkgrel=$new_pr/" "$src/PKGBUILD"
     echo "republishing $pkg: pkgrel $pr -> $new_pr"
     pr=$new_pr
