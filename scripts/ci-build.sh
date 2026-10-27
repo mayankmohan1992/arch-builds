@@ -158,14 +158,14 @@ for pkg in $PKGS; do
     continue
   fi
 
-  # Rebuilding a version that was already published would reuse the same
-  # filename with different bytes, and any client holding the old copy in
-  # /var/cache/pacman/pkg would then fail signature verification. Bump past
-  # what is published (1.1 -> 1.2) so the filename and version both change.
-  if [[ -n $state_ver && ${state_ver%%-*} == "$pv" ]]; then
+  # Only a deliberate repair (FORCE=1) bumps the version. Rebuilding because an
+  # asset was missing must reuse the same version: there are no published bytes
+  # under that name to collide with, and bumping on every hiccup caused
+  # version churn.
+  if [[ ${FORCE:-0} == 1 && -n $state_ver && ${state_ver%%-*} == "$pv" ]]; then
     new_pr=$(awk -F. 'BEGIN{OFS="."} { $NF = $NF + 1; print }' <<<"${state_ver##*-}")
     sed -i -E "s/^pkgrel=.*/pkgrel=$new_pr/" "$src/PKGBUILD"
-    echo "republishing $pkg: pkgrel $pr -> $new_pr"
+    echo "repair rebuild $pkg: pkgrel $pr -> $new_pr"
     pr=$new_pr
   fi
 
