@@ -152,7 +152,7 @@ for pkg in $PKGS; do
   computed="$pv-$pr"
   if [[ ${FORCE:-0} != 1 && -n $state_ver ]] &&
      (( $(vercmp "$state_ver" "$computed") >= 0 )) &&
-     compgen -G "repo/${pkg}-${pv}-*.pkg.tar.zst" >/dev/null; then
+     compgen -G "repo/${pkg}-*${pv}-*.pkg.tar.zst" >/dev/null; then
     echo "$pkg $state_ver already published; skipping"
     echo "::endgroup::"
     continue
