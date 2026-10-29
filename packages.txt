@@ -4,7 +4,6 @@
 
 # --- Tier 1: applications and tools -----------------------------------------
 git
-nodejs
 graphviz
 starship
 tldr
@@ -34,6 +33,16 @@ bluez
 gcr
 gcr-4
 fwupd
+
+
+# --- Vendored recipes (pkgs/<name>) -----------------------------------------
+# Rust desktop apps from getartcraft.com, currently compiled locally by yay.
+# They build with cargo; the workflow's RUSTFLAGS=-C target-cpu=znver4 plus the
+# recipe's own thin-LTO / opt-level=3 settings produce the fastest binaries.
+# check-upstream.sh tracks their AUR versions and re-dispatches on bumps.
+gridcraft
+pdfcraft
+wordcraft
 
 # --- Deliberately excluded ---------------------------------------------------
 # System-breaking: glibc, gcc/gcc-libs, binutils, base, filesystem,
@@ -67,3 +76,8 @@ fwupd
 # gobject-introspection against the freshly compiled v4 library, which SIGILLs
 # on GitHub's Zen 3 runners. Any package that executes its own output during
 # the build cannot be v4-built here.
+
+# nodejs is deliberately last: its V8 build takes 2-3 hours on a 4-core runner.
+# Publishing is incremental, so putting it last means the fast packages always
+# land even if nodejs is slow or the job is cut off.
+nodejs

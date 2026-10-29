@@ -27,19 +27,37 @@ curl -sfL "$STATE_URL" -o "$tmp/state.json" 2>/dev/null || echo '{}' >"$tmp/stat
 
 need=()
 lookup_failed=0
+repo_root=$(dirname "$MANAGED")
 while read -r pkg; do
   [[ -z $pkg || $pkg == \#* ]] && continue
-  # vendored recipes (pkgs/<name>) have their own upstream tracking
-  [[ -d "$(dirname "$MANAGED")/pkgs/$pkg" ]] && continue
 
-  if ! curl -sfL "https://archlinux.org/packages/search/json/?name=$pkg" -o "$tmp/$pkg.json"; then
-    log "$pkg: upstream lookup failed; leaving it alone"
-    lookup_failed=1
-    continue
-  fi
-  upstream=$(python3 -c 'import json,sys
+  if [[ -d "$repo_root/pkgs/$pkg" ]]; then
+    # Vendored recipe (AUR/custom): track the AUR version, which carries both
+    # pkgver and pkgrel in a single string.
+    if ! curl -sfL "https://aur.archlinux.org/rpc/v5/info?arg[]=$pkg" -o "$tmp/$pkg.json"; then
+      log "$pkg: AUR lookup failed; leaving it alone"
+      lookup_failed=1
+      continue
+    fi
+    upstream=$(python3 -c 'import json,sys
+r = (json.load(open(sys.argv[1])).get("results") or [{}])[0]
+print(r.get("Version", ""))' "$tmp/$pkg.json" 2>/dev/null) || upstream=""
+    if [[ -z $upstream ]]; then
+      # Not in the AUR at all: nothing to compare against, leave it alone.
+      log "$pkg: not found in AUR; skipping version check"
+      continue
+    fi
+  else
+    if ! curl -sfL "https://archlinux.org/packages/search/json/?name=$pkg" -o "$tmp/$pkg.json"; then
+      log "$pkg: upstream lookup failed; leaving it alone"
+      lookup_failed=1
+      continue
+    fi
+    upstream=$(python3 -c 'import json,sys
 r = (json.load(open(sys.argv[1])).get("results") or [{}])[0]
 print("{}-{}".format(r.get("pkgver", ""), r.get("pkgrel", "")))' "$tmp/$pkg.json" 2>/dev/null) || upstream=""
+  fi
+
   if [[ -z $upstream || $upstream == "-" ]]; then
     log "$pkg: could not parse upstream version"
     lookup_failed=1
