@@ -227,13 +227,18 @@ for pkg in $PKGS; do
   changed=()
   for f in out/*.pkg.tar.zst; do
     [[ -e $f ]] || continue
-    cp "$f" repo/
+    # GitHub release assets cannot contain ':' (package epochs) and silently
+    # rewrite it to '.'. Record the sanitized name in the database, otherwise
+    # pacman requests a filename that does not exist and the transaction fails.
+    safe_name="${f##*/}"
+    safe_name="${safe_name//:/}"
+    cp "$f" "repo/$safe_name"
     if [[ -f $f.sig ]]; then
-      cp "$f.sig" repo/
+      cp "$f.sig" "repo/$safe_name.sig"
     else
       echo "::error::makepkg produced no signature for $(basename "$f")"
     fi
-    changed+=("repo/$(basename "$f")")
+    changed+=("repo/$safe_name")
   done
 
   # Authoritative check: the pair we are about to upload must verify locally.
