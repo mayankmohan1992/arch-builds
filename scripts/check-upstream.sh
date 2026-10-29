@@ -50,9 +50,11 @@ print("{}-{}".format(r.get("pkgver", ""), r.get("pkgrel", "")))' "$tmp/$pkg.json
   published=$(python3 -c 'import json,sys
 state=json.load(open(sys.argv[1]))
 print(state.get(sys.argv[2],""))' "$tmp/state.json" "$pkg")
-  expected="$upstream.1"
-
-  if [[ $published != "$expected" ]]; then
+  # Queue only when what we published is not at least as new as upstream.
+  # Comparing with vercmp instead of equality against "<upstream>.1" is what
+  # stops the timer re-queueing packages whose pkgrel was legitimately bumped
+  # (git 2.56.0-2.1 vs upstream 2.56.0-1 was being re-dispatched every run).
+  if [[ -z $published ]] || (( $(vercmp "$published" "$upstream") <= 0 )); then
     log "$pkg: published=${published:-none} upstream=$upstream -> queue"
     need+=("$pkg")
   fi

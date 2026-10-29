@@ -185,11 +185,26 @@ for pkg in $PKGS; do
     pgp_flags=(--skippgpcheck)
   done
 
+  build_conf=/etc/makepkg.conf
+  case $pkg in
+    # Some builds execute their own freshly compiled tools. V8 runs `torque`
+    # and `mksnapshot` during `make`, and GitHub's runner pool mixes Intel
+    # (AVX-512) with AMD EPYC (Zen 3, no AVX-512) - a znver4 torque binary
+    # SIGILLs on EPYC, which is why nodejs failed intermittently. Build such
+    # packages for x86-64-v3 (AVX2/BMI2, still well above baseline) and keep
+    # -mtune=znver4, which only affects scheduling.
+    nodejs)
+      build_conf="$GITHUB_WORKSPACE/makepkg-v3.conf"
+      sed 's/-march=znver4/-march=x86-64-v3/g' /etc/makepkg.conf >"$build_conf"
+      echo "$pkg: building for x86-64-v3 so build-time tools can execute on any runner"
+      ;;
+  esac
+
   build_log="$GITHUB_WORKSPACE/build-$pkg.log"
   makepkg_once() {
     ( cd "$src" && PKGDEST="$GITHUB_WORKSPACE/out" SRCDEST="$GITHUB_WORKSPACE/srcdest" \
        RUSTFLAGS="-C target-cpu=znver4" CARGO_BUILD_JOBS="$(nproc)" \
-       makepkg -s --noconfirm --nocheck --cleanbuild --sign --key "$KEYID" "${pgp_flags[@]}" ) \
+       makepkg --config "$build_conf" -s --noconfirm --nocheck --cleanbuild --sign --key "$KEYID" "${pgp_flags[@]}" ) \
       2>&1 | tee -a "$build_log"
   }
 
