@@ -110,3 +110,34 @@ user's GnuPG keyring. To rotate: generate a new key, update
   downgrade back to the `-1` / `-1.1` pkgrels.
 * `/var/cache/pacman/pkg` keeps the previous builds; `omarchy-snapshot` gives a
   bootable rollback.
+
+## Vendored recipes (`pkgs/<name>`)
+
+AUR/custom recipes live in `pkgs/<name>/PKGBUILD` instead of being fetched from
+Arch's packaging tree. `scripts/check-upstream.sh` tracks them through the AUR
+RPC (Arch packages use the archlinux.org API), so the local timer re-dispatches
+them when their AUR version changes.
+
+Currently vendored: `gridcraft`, `pdfcraft`, `wordcraft` (getartcraft.com).
+These are Rust desktop apps that were previously compiled locally by yay. They
+build with `cargo --frozen --release`; the recipe already sets thin-LTO,
+`codegen-units=1` and `opt-level=3`.
+
+## Rust binaries: RUSTFLAGS comes from `~/.makepkg.conf`
+
+`makepkg` sources the *builder's* `~/.makepkg.conf` **after** the system config,
+so `RUSTFLAGS` exported in the job environment is silently ignored. The
+workflow therefore writes:
+
+```sh
+/home/builder/.makepkg.conf
+RUSTFLAGS="-C force-frame-pointers=yes -C target-cpu=znver4"
+```
+
+Without it, every cargo-built package (starship, tldr, usage, semver, librsvg,
+gridcraft, pdfcraft, wordcraft) is baseline x86-64 even though CFLAGS say
+znver4. Measured on the same app: 113,553 `zmm` instructions locally (native)
+versus 569 from CI before this fix.
+
+Never use `-C target-cpu=native` in CI: the runner is Zen 3 or Intel, and the
+artifact must target this machine.
