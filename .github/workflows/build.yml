@@ -55,6 +55,20 @@ jobs:
           useradd -m builder
           echo 'builder ALL=(ALL) NOPASSWD: ALL' >/etc/sudoers.d/builder
           chown -R builder:builder "$GITHUB_WORKSPACE"
+          # Rust ignores CFLAGS, so RUSTFLAGS is what actually applies the
+          # target CPU to cargo builds. makepkg sources the *builder's*
+          # ~/.makepkg.conf last, which is why setting RUSTFLAGS in the
+          # environment had no effect: without this file every Rust package
+          # (starship, tldr, usage, semver, librsvg, the artcraft apps) was
+          # built for baseline x86-64.
+          #
+          # znver4 explicitly, never `native`: the runner is Zen 3 / Intel and
+          # must not decide the instruction set for this machine.
+          cat >/home/builder/.makepkg.conf <<'EOF'
+          RUSTFLAGS="-C force-frame-pointers=yes -C target-cpu=znver4"
+          CARGO_BUILD_JOBS="$(nproc)"
+          EOF
+          chown builder:builder /home/builder/.makepkg.conf
           # Keep every stock Arch setting and override only the target CPU, so
           # hardening flags and defaults stay identical to the official build.
           # Notes on the flag choice for Zen 4 (Ryzen 5 7600):
