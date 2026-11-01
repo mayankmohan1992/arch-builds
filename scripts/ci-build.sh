@@ -227,8 +227,30 @@ for spec in $PKGS; do
       2>&1 | tee -a "$build_log"
   }
 
+  # Anything that executes its own freshly compiled output during the build
+  # dies on a runner without AVX-512: GitHub's pool mixes Intel (AVX-512) with
+  # AMD EPYC (Zen 3, none). Rust is the common case - every proc-macro and
+  # build script is compiled with RUSTFLAGS and then run - but C configure
+  # probes hit it too. Falling back to x86-64-v3 (AVX2/BMI2/FMA, still far
+  # above baseline) is what keeps a mixed runner pool from turning the repo red.
+  #
+  # RUSTFLAGS has to be rewritten in ~/.makepkg.conf, not exported: makepkg
+  # sources that file after the environment, so an exported value is ignored.
+  fall_back_to_v3() {
+    echo "::warning::$pkg: build-time tool SIGILL (runner has no AVX-512); rebuilding for x86-64-v3"
+    cat >"$HOME/.makepkg.conf" <<EOF
+RUSTFLAGS="-C force-frame-pointers=yes -C target-cpu=x86-64-v3"
+CARGO_BUILD_JOBS="$(nproc)"
+EOF
+    build_conf="$GITHUB_WORKSPACE/makepkg-v3.conf"
+    sed 's/-march=znver4/-march=x86-64-v3/g' /etc/makepkg.conf >"$build_conf"
+    echo "$pkg: retrying with -march=x86-64-v3 / target-cpu=x86-64-v3"
+  }
+
   if ! makepkg_once; then
-    if grep -q 'PGP signatures could not be verified' "$build_log"; then
+    if grep -qE 'SIGILL|Illegal instruction' "$build_log"; then
+      fall_back_to_v3
+    elif grep -q 'PGP signatures could not be verified' "$build_log"; then
       # Covers the case where a key is present but the signing subkey is not.
       echo "::warning::$pkg: signature verification failed; retrying with --skippgpcheck"
       pgp_flags=(--skippgpcheck)
