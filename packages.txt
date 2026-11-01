@@ -1,6 +1,16 @@
-# Managed set: Arch pkgbases rebuilt with -march=znver4 by GitHub Actions.
+# Managed set: rebuilt with -march=znver4 by GitHub Actions.
 # Only packages ALHP does not cover, that fit a 14 GB / 6 h runner, and that are
 # safe to replace. One entry per PKGBUILD (split packages are built together).
+#
+# Spec format (see scripts/lib.sh):
+#   git              Arch official packaging, fetched from gitlab.archlinux.org
+#   aur:name         AUR recipe, git-cloned at build time
+#   omarchy:name     omacom/omarchy-pkgs recipe, sparse-checked out at build time
+#   local:name       hand-written recipe in pkgs/name (bumped by hand)
+#
+# Recipes are fetched fresh on every build, so a version bump upstream always
+# brings its PKGBUILD with it. That is what makes "rebuild only when upstream
+# actually moved" true without anybody editing a recipe.
 
 # --- Tier 1: applications and tools -----------------------------------------
 git
@@ -34,15 +44,56 @@ gcr
 gcr-4
 fwupd
 
+# --- Tier 3: ArtCraft desktop apps (AUR) ------------------------------------
+# Rust apps from getartcraft.com, maintained in the AUR by alerque. Cloned at
+# build time, so `check-upstream.sh` sees a new AUR version and dispatches.
+# RUSTFLAGS=-C target-cpu=znver4 plus each recipe's own thin-LTO and
+# opt-level=3 settings produce the fastest binaries.
+aur:gridcraft
+aur:pdfcraft
+aur:wordcraft
+aur:cadcraft
+aur:deckcraft
+aur:designcraft
+aur:effectcraft
+aur:figcraft
+aur:filmcraft
+aur:lightcraft
+aur:photocraft
+aur:soundcraft
+aur:vectorcraft
+
+# --- Tier 4: Omarchy's own compiled packages --------------------------------
+# Omarchy ships these as generic x86-64 from pkgs.omarchy.org. Our pkgrel .1
+# makes pacman prefer the znver4 build; the next Omarchy release wins again
+# until CI rebuilds, exactly like the Arch packages above.
+#
+# owe      C/meson   wallpaper engine - mp4/gif decode through mpv+ffmpeg
+# gliff    Rust      remote desktop - GPU H.264 encode
+# cliamp   Go        terminal music player - GOAMD64=v4 (see ci-build.sh)
+# omacalc  C++/Qt    calculator
+# omacut   C++/Qt    video trimmer
+# hype     C++/Qt    markdown presentations
+# monologue C++/Qt   voice dictation
+omarchy:owe
+omarchy:gliff
+omarchy:cliamp
+omarchy:omacalc
+omarchy:omacut
+omarchy:hype
+omarchy:monologue
 
 # --- Vendored recipes (pkgs/<name>) -----------------------------------------
-# Rust desktop apps from getartcraft.com, currently compiled locally by yay.
-# They build with cargo; the workflow's RUSTFLAGS=-C target-cpu=znver4 plus the
-# recipe's own thin-LTO / opt-level=3 settings produce the fastest binaries.
-# check-upstream.sh tracks their AUR versions and re-dispatches on bumps.
-gridcraft
-pdfcraft
-wordcraft
+# Hand-maintained because upstream has no usable recipe of its own. These are
+# NOT auto-tracked: bump pkgver deliberately, patches may need refreshing.
+#
+# xmrig-cuda-tuned: AUR xmrig does not ship the CUDA backend, and the CPU must
+# be znver4 for RandomX. Replaces stock xmrig via provides/conflicts.
+local:xmrig-cuda-tuned
+# gupax: AUR is stuck at 1.3.10 while upstream is 2.0.2, and the recipe carries
+# a local patch. Its build-time tools do not need nightly (we dropped
+# -Zlocation-detail=none so stable cargo works in CI).
+local:gupax
 
 # --- Deliberately excluded ---------------------------------------------------
 # System-breaking: glibc, gcc/gcc-libs, binutils, base, filesystem,
@@ -56,28 +107,41 @@ wordcraft
 #   electron43, electron44.
 # No compiled code worth rebuilding: fonts, icon themes, data packages,
 #   pure-Python/JS packages, shell scripts (yt-dlp, udiskie, ufw, npm, ...).
-# Omarchy-owned: excluded by decision, their channel owns them.
+# Go binaries that ignore CFLAGS: yay, tldr is kept only because the recipe
+#   still builds it; its gain is nil.
 # python: Arch already builds it PGO+LTO; gain is ~3% on an interpreter the hot
 #   apps do not use, and its PGO profile step needs a generated locale.
-
+#
+# aether (omarchy): its recipe installs a PREBUILT Go binary from GitHub
+#   releases, so rebuilding it changes nothing. Optimising it needs a wails +
+#   node + webkit2gtk source build, which is heavy and fragile for an app that
+#   runs only while you are changing themes. Revisit if it becomes hot.
+#
+# omarchy-hyprland-titlebars (omarchy): a Hyprland plugin is only loadable by
+#   the exact Hyprland build it was compiled against, and the recipe pins
+#   hyprland=0.57.0 while this machine runs 0.56.2 (IgnorePkg=hyprland).
+#   Rebuilding it against ALHP's Hyprland would risk the compositor for a
+#   marginal gain. Left to Omarchy.
+#
 # libasyncns: dropped. Upstream's git host (git.0pointer.net) serves a cert
 # that fails hostname validation, so the source cannot be fetched reliably.
 # It is a tiny, effectively deprecated library with no meaningful gain.
-
+#
 # kirigami: dropped. KDE re-uploaded the 6.31.0 tarball after Arch packaged it
 # (actual sha256 811a8a15... vs Arch's f21df727...), so the recipe fails its
 # own checksum. Not worth trusting a re-tagged upstream artifact.
 # ruby: dropped. Its build executes the freshly compiled miniruby, and GitHub's
 # standard runners are AMD EPYC (Zen 3, no AVX-512), so a znver4 binary SIGILLs
 # ("Illegal instruction (core dumped)"). Packages that run their own output
-# during the build cannot be v4-built on this infrastructure.
-
+# during the build cannot be v4-built on this infrastructure. The old asset is
+# removed from the release so stock ruby takes over on the next Arch bump.
+#
 # libcloudproviders: dropped, same class as ruby. Its build runs
 # gobject-introspection against the freshly compiled v4 library, which SIGILLs
 # on GitHub's Zen 3 runners. Any package that executes its own output during
 # the build cannot be v4-built here.
 
 # nodejs is deliberately last: its V8 build takes 2-3 hours on a 4-core runner.
-# Publishing is incremental, so putting it last means the fast packages always
-# land even if nodejs is slow or the job is cut off.
+# It builds for x86-64-v3, not v4, because its own torque/mksnapshot tools run
+# during the build and SIGILL on Zen 3 runners (see ci-build.sh).
 nodejs

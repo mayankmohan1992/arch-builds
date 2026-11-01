@@ -9,20 +9,31 @@ ALHP already rebuilds ~790 Arch packages with `-O3 -march=x86-64-v4`, so this
 repository is **not** a replacement for it. It covers the gaps ALHP leaves:
 
 * Arch packages ALHP does not build (see `packages.txt`);
-* AUR/custom recipes that are expensive to build locally (`xmrig-cuda-tuned`);
+* AUR recipes (`aur:`) and Omarchy's own packages (`omarchy:`), which no
+  distribution rebuilds for this CPU;
+* hand-written recipes that are expensive to build locally (`local:`);
 * a delivery path for anything built elsewhere, so it survives `omarchy update`.
 
 It deliberately does **not** include: `glibc`, `gcc`/`gcc-libs`, `binutils`,
 `base`, `filesystem`, `linux-firmware/*`, keyrings, the kernel, NVIDIA's
-proprietary blobs, or Omarchy's own packages. Those are either unsafe to
+proprietary blobs, or the `omarchy` package itself. Those are either unsafe to
 replace, have no compilable code, or would fight Omarchy's own channel.
 
 ## Managed set
 
-`packages.txt` is the source of truth. Recipes come from Arch's official
-packaging repository (`gitlab.archlinux.org/archlinux/packaging/packages`), so
-upstream patches and dependency lists are reused verbatim and tracking upstream
-is automatic.
+`packages.txt` is the source of truth. Each line is a **spec**:
+
+| Spec | Recipe comes from | Version tracked via |
+|---|---|---|
+| `git` | Arch packaging (`gitlab.archlinux.org`) | archlinux.org API |
+| `aur:deckcraft` | AUR (`git clone`) | AUR RPC |
+| `omarchy:owe` | `omacom/omarchy-pkgs` (sparse checkout) | that PKGBUILD |
+| `local:gupax` | `pkgs/gupax/` | none — bumped by hand |
+
+Recipes are **fetched fresh on every build**, never vendored, so a version bump
+upstream always arrives together with its matching PKGBUILD. That is what makes
+"rebuild only when upstream actually moved" true without anyone editing a
+recipe by hand.
 
 Only the target CPU differs: the workflow rewrites `CFLAGS`/`CXXFLAGS` in
 Arch's own `makepkg.conf` to `-march=znver4 -O3`, inheriting every other stock
@@ -30,33 +41,82 @@ setting. `pkgrel` gets a `.1` suffix (`1` → `1.1`) so pacman prefers our build
 over the stock one, while a newer upstream version always wins until CI
 rebuilds — a stale custom build can never pin itself in place.
 
-`python` is deliberately absent: Arch already builds it with PGO+LTO, so our
-only gain is `-march` (~3–8%), and its PGO profile step needs a generated
-`en_US.UTF-8` locale. Not worth replacing the system interpreter.
-
 ## How a build flows
 
-1. `workflow_dispatch` (or a push touching `packages.txt`, `pkgs/**`,
-   `scripts/ci-build.sh`, or the workflow) starts the job.
-2. The job runs in an `archlinux:base-devel` container, rewrites `makepkg.conf`
-   for znver4, imports the signing key and every `validpgpkeys` entry the recipe
-   declares, then builds each package with `makepkg --sign`.
-3. After **each** package it regenerates the database with `repo-add --sign`,
-   updates `state.json`, and re-uploads to the `mayank-v4` release. A failure
-   late in the list does not lose the packages already built.
-4. `pacman -Syu` — normally via `omarchy update` — sees the newer `pkgrel` and
-   installs it.
+Three jobs, because one sequential job cannot hold `nodejs` (2–3 h) plus forty
+other packages inside a 6 h cap:
+
+1. **plan** — downloads `state.json` and compares every spec against its
+   upstream. Emits the matrix of packages that are actually behind.
+2. **build** — a matrix, one container per package (`max-parallel: 6`,
+   `fail-fast: false`). Each job fetches its recipe, builds, audits the output,
+   and uploads only the package + signature. One broken recipe cannot stop the
+   other packages.
+3. **publish** — a single writer. Downloads the assets, prunes superseded
+   versions, regenerates the database with `repo-add --sign`, derives
+   `state.json` from each package's `.PKGINFO`, and uploads both.
+
+`state.json` is derived from `.PKGINFO`, not from filenames: epochs contain `:`
+which GitHub rewrites in asset names, so a filename is not a reliable source of
+truth for a version.
 
 ## Update process
 
 * `scripts/check-upstream.sh` runs from a systemd **user timer** every 6 hours.
-  It compares `state.json` against Arch's package API and dispatches a build
-  only for packages that are missing or behind.
+  It compares `state.json` against each spec's upstream and dispatches a build
+  **only** for packages that are missing or behind. When nothing moved, nothing
+  is dispatched.
+* `local:` specs are skipped by the timer: they have no upstream to ask, and
+  are bumped by hand.
 * A GitHub `schedule:` is deliberately not used: GitHub disables scheduled
   workflows in public repositories after 60 days without repository activity.
 * Nothing needs to be run locally to receive updates; `omarchy update` is enough.
 * `~/.config/omarchy/hooks/pre-refresh-pacman.d/20-mayank-v4.sh` re-adds the
   repository stanza if Omarchy ever rewrites `pacman.conf`.
+
+Run it by hand at any time:
+
+```sh
+scripts/check-upstream.sh --dry-run   # report only, no dispatch
+scripts/check-upstream.sh             # dispatch if anything is behind
+```
+
+## Why updates never break
+
+* `pkgrel` is `<upstream>.1`, so our build wins ties but loses to any newer
+  upstream version. A stale custom build cannot pin itself in place.
+* The `[mayank-v4]` stanza sits above `[core]`; pacman still picks the highest
+  version, so an Omarchy or Arch release immediately outranks ours until CI
+  catches up.
+* Every package is built from the same source and the same PKGBUILD as
+  upstream — only the CPU target changes. The ABI is identical.
+* Every upload is signed and verified locally before it is published; a
+  package whose signature does not verify is never uploaded.
+* `scripts/setup-local-repo.sh --remove` plus `pacman -Syyuu` reverses
+  everything, and `omarchy-snapshot` gives a bootable rollback.
+
+## Verifying the output is really v4
+
+`scripts/verify-v4.sh` disassembles each built package and reports AVX-512
+(`zmm`) and AVX2 (`ymm`) instruction counts. This exists because of a real
+regression: `makepkg` sources the *builder's* `~/.makepkg.conf` **after** the
+system config, so `RUSTFLAGS` exported in the job environment was silently
+ignored and every Rust package shipped baseline x86-64 for weeks.
+
+Measured reference points on this machine (Ryzen 5 7600):
+
+```
+starship  zmm=33529   Rust, vectorised
+usage     zmm=35033   Rust, vectorised
+gridcraft zmm=112552  Rust, vectorised
+git       zmm=7983    C, vectorised
+tldr      zmm=0       Go binary, CFLAGS never applied
+semver    zmm=0       Rust, too small to vectorise
+```
+
+Zero is legitimate for Go and tiny binaries, so the audit warns rather than
+fails. The hard gate is in the workflow: the run fails early if `-march=znver4`
+or `target-cpu=znver4` ever stops landing in the config files.
 
 ## Free-tier notes
 
@@ -67,7 +127,11 @@ only gain is `-march` (~3–8%), and its PGO profile step needs a generated
 * Runner: 4 vCPU / 16 GB RAM / 14 GB SSD, 6 h job limit. Chromium cannot be
   built here (its checkout alone is ~40 GB); `webkit2gtk`, `qt6-webengine`,
   `opencv`, `gtk4` and the `gstreamer` stack are excluded for the same reason.
+* The matrix is what keeps `nodejs` from eating the whole budget: it gets its
+  own 6 h job instead of sharing one with everything else.
 * No separate `-debug` packages (they doubled CI time and repo size).
+* `publish-db.sh` prunes superseded versions, so the release does not grow by
+  one copy per rebuild.
 
 ## Activate on this machine (one time, needs root)
 
@@ -90,11 +154,14 @@ bsdtar -tf mayank-v4.db
 
 ## Adding a package
 
-Arch package: add the name to `packages.txt` and push.
+| What | How |
+|---|---|
+| Arch package | add the name to `packages.txt`, push |
+| AUR package | add `aur:<name>`, push |
+| Omarchy package | add `omarchy:<name>`, push |
+| Anything else | create `pkgs/<name>/PKGBUILD`, add `local:<name>`, push |
 
-AUR/custom recipe: create `pkgs/<name>/PKGBUILD` (and any local sources) and
-push. Vendored recipes are not auto-tracked by `check-upstream.sh`; bump their
-`pkgver` deliberately, since patches may need refreshing.
+Everything except `local:` is tracked automatically from then on.
 
 ## Signing
 
@@ -111,18 +178,6 @@ user's GnuPG keyring. To rotate: generate a new key, update
 * `/var/cache/pacman/pkg` keeps the previous builds; `omarchy-snapshot` gives a
   bootable rollback.
 
-## Vendored recipes (`pkgs/<name>`)
-
-AUR/custom recipes live in `pkgs/<name>/PKGBUILD` instead of being fetched from
-Arch's packaging tree. `scripts/check-upstream.sh` tracks them through the AUR
-RPC (Arch packages use the archlinux.org API), so the local timer re-dispatches
-them when their AUR version changes.
-
-Currently vendored: `gridcraft`, `pdfcraft`, `wordcraft` (getartcraft.com).
-These are Rust desktop apps that were previously compiled locally by yay. They
-build with `cargo --frozen --release`; the recipe already sets thin-LTO,
-`codegen-units=1` and `opt-level=3`.
-
 ## Rust binaries: RUSTFLAGS comes from `~/.makepkg.conf`
 
 `makepkg` sources the *builder's* `~/.makepkg.conf` **after** the system config,
@@ -135,9 +190,27 @@ RUSTFLAGS="-C force-frame-pointers=yes -C target-cpu=znver4"
 ```
 
 Without it, every cargo-built package (starship, tldr, usage, semver, librsvg,
-gridcraft, pdfcraft, wordcraft) is baseline x86-64 even though CFLAGS say
-znver4. Measured on the same app: 113,553 `zmm` instructions locally (native)
-versus 569 from CI before this fix.
+the artcraft apps, gliff) is baseline x86-64 even though CFLAGS say znver4.
 
 Never use `-C target-cpu=native` in CI: the runner is Zen 3 or Intel, and the
 artifact must target this machine.
+
+## Packages that cannot be v4-built here
+
+* **Anything that runs its own freshly compiled output during the build.**
+  GitHub's standard runners are AMD EPYC (Zen 3, no AVX-512), so a znver4
+  binary SIGILLs ("Illegal instruction"). This is why `ruby` and
+  `libcloudproviders` are dropped.
+* **`nodejs`** is the same class: V8 runs `torque` and `mksnapshot` during
+  `make`. It is built for `x86-64-v3` (AVX2/BMI2) with `-mtune=znver4`, which
+  only affects scheduling. It still beats baseline x86-64, and it is the only
+  package in the set that is not v4.
+* **`gupax`** needs nightly Rust (`#![feature(path_is_empty)]`). The matrix job
+  installs one minimal nightly and the recipe sets `RUSTUP_TOOLCHAIN` so rustup
+  does not try to fetch the project's full component list.
+* **`omarchy-hyprland-titlebars`** is a Hyprland plugin: it only loads into the
+  exact Hyprland build it was compiled against, and the recipe pins
+  `hyprland=0.57.0` while this machine runs 0.56.2 (`IgnorePkg = hyprland`).
+  Left to Omarchy.
+* **`aether`** ships a prebuilt Go binary in its recipe, so rebuilding changes
+  nothing; a real rebuild needs wails + node + webkit2gtk.

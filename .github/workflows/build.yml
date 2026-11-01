@@ -3,9 +3,17 @@ name: build-packages
 # Builds packages on an Arch container, signs them, and publishes them to the
 # "mayank-v4" release which pacman consumes.
 #
+# Three jobs:
+#   plan     decides what actually needs a build (state.json vs upstream)
+#   build    a matrix, one container per package, uploads package bytes only
+#   publish  one writer: regenerates the pacman db + state.json
+#
+# The matrix is why nodejs can no longer eat the whole 6 h job budget, and why
+# one broken recipe cannot stop the other 40 packages from publishing.
+#
 # Free-tier constraints respected here:
 #   * public repo  -> standard runners are free and unlimited
-#   * releases     -> free for public repos; no total size/bandwidth limit
+#   * releases      -> free for public repos; no total size/bandwidth limit
 #   * artifacts    -> NOT used (free plan caps them at 500 MB)
 #   * runner       -> 4 vCPU / 16 GB RAM / 14 GB SSD, 6 h job cap
 #   * no schedule: -> GitHub disables scheduled workflows in public repos after
@@ -15,7 +23,7 @@ on:
   workflow_dispatch:
     inputs:
       pkgs:
-        description: "Optional space-separated package override (blank = packages.txt)"
+        description: "Optional space-separated package names/specs (blank = packages.txt)"
         required: false
         default: ""
       force:
@@ -26,7 +34,7 @@ on:
     branches: [main]
     paths:
       - "pkgs/**"
-      - "scripts/ci-build.sh"
+      - "scripts/**"
       - "packages.txt"
       - ".github/workflows/build.yml"
 
@@ -42,16 +50,47 @@ env:
   GH_REPO: ${{ github.repository }}
 
 jobs:
-  build:
+  plan:
     runs-on: ubuntu-latest
     container:
       image: archlinux:base-devel
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      any: ${{ steps.plan.outputs.any }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
+      - name: Plan
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+          REQUESTED: ${{ inputs.pkgs }}
+        run: |
+          pacman -Syu --noconfirm --needed curl python github-cli >/dev/null
+          mkdir -p repo
+          gh release download "$REPO_NAME" --repo "$GH_REPO" --dir repo \
+            --pattern state.json --skip-existing || true
+          read -r -a req <<<"$REQUESTED" || true
+          ./scripts/plan.sh "${req[@]}"
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        pkg: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v5
 
       - name: Prepare builder
         run: |
-          pacman -Syu --noconfirm --needed git github-cli gnupg sudo curl python
+          pacman -Syu --noconfirm --needed git github-cli gnupg sudo curl python binutils >/dev/null
           useradd -m builder
           echo 'builder ALL=(ALL) NOPASSWD: ALL' >/etc/sudoers.d/builder
           chown -R builder:builder "$GITHUB_WORKSPACE"
@@ -93,6 +132,11 @@ jobs:
           # never useful here.
           sed -i 's/ debug / !debug /' /etc/makepkg.conf
           grep -m3 -E '^(CFLAGS|CXXFLAGS|LTOFLAGS)=' /etc/makepkg.conf
+          # Hard gate: if the flags below ever stop landing, the run fails here
+          # instead of silently publishing baseline x86-64 binaries.
+          grep -q -- '-march=znver4' /etc/makepkg.conf
+          grep -q -- 'target-cpu=znver4' /home/builder/.makepkg.conf
+          echo "verified: znver4 present in both makepkg.conf and ~/.makepkg.conf"
 
       - name: Import signing key
         env:
@@ -116,11 +160,63 @@ jobs:
           echo "KEYID=$KEYID" >>"$GITHUB_ENV"
           echo "signing with $KEYID"
 
-      - name: Build and publish
+      - name: Rust nightly for gupax
+        if: matrix.pkg == 'local:gupax'
+        run: |
+          # gupax needs nightly (#![feature(path_is_empty)]) and pins its own
+          # toolchain in rust-toolchain.toml. Install one minimal nightly; the
+          # recipe sets RUSTUP_TOOLCHAIN so rustup does not try to fetch the
+          # project's full component list (rustc-dev, codegen-cranelift, ...).
+          pacman -S --noconfirm --needed rustup >/dev/null
+          runuser -u builder -- rustup toolchain install nightly-2025-11-12 --profile minimal
+          runuser -u builder -- rustup default nightly-2025-11-12
+          runuser -u builder -- /home/builder/.cargo/bin/rustc --version
+
+      - name: Build ${{ matrix.pkg }}
         env:
           GH_TOKEN: ${{ github.token }}
-          PKGS: ${{ inputs.pkgs }}
+          PKGS: ${{ matrix.pkg }}
           FORCE: ${{ inputs.force }}
+          PUBLISH_DB: "0"
         run: |
           chown -R builder:builder "$GITHUB_WORKSPACE"
-          runuser -u builder -- bash -c 'cd "$GITHUB_WORKSPACE" && ./scripts/ci-build.sh'
+          # ~/.cargo/bin first so a rustup-managed toolchain (gupax) wins over
+          # the distro cargo; a missing dir on the PATH is harmless.
+          runuser -u builder -- bash -c \
+            'export PATH=/home/builder/.cargo/bin:$PATH; cd "$GITHUB_WORKSPACE" && ./scripts/ci-build.sh'
+
+  publish:
+    needs: [plan, build]
+    if: always() && needs.plan.outputs.any == 'true' && needs.build.result != 'cancelled'
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Prepare publisher
+        run: |
+          pacman -Syu --noconfirm --needed git github-cli gnupg sudo curl python >/dev/null
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' >/etc/sudoers.d/builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+
+      - name: Import signing key
+        env:
+          PKG_SIGNING_KEY: ${{ secrets.PKG_SIGNING_KEY }}
+        run: |
+          install -d -o builder -g builder -m 700 /home/builder/.gnupg
+          printf '%s\n' "$PKG_SIGNING_KEY" >/tmp/key.asc
+          chown builder /tmp/key.asc
+          runuser -u builder -- gpg --batch --import /tmp/key.asc
+          rm -f /tmp/key.asc
+          runuser -u builder -- gpg --list-secret-keys --with-colons >/tmp/keys.txt
+          KEYID=$(awk -F: '/^fpr:/{print $10; exit}' /tmp/keys.txt)
+          test -n "$KEYID"
+          echo "KEYID=$KEYID" >>"$GITHUB_ENV"
+
+      - name: Publish database
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          runuser -u builder -- bash -c 'cd "$GITHUB_WORKSPACE" && ./scripts/publish-db.sh'

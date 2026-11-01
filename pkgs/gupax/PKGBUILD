@@ -1,0 +1,70 @@
+# Maintainer: Mayank Mohan <er.mayankmohan@gmail.com>
+# Locally tuned build of Gupax for this machine.
+# Built with the [distro] feature: Gupax's built-in self-updater is disabled,
+# so the package (and its XMRig/P2Pool binaries) are updated by pacman,
+# i.e. by `omarchy update`.
+#
+# This is a `local:` spec: the AUR is stuck at 1.3.10 while upstream is 2.x, and
+# the recipe carries a local patch. Bump pkgver by hand when upstream moves.
+#
+# Upstream requires nightly (`#![feature(path_is_empty)]`) and pins its own
+# toolchain in rust-toolchain.toml. RUSTUP_TOOLCHAIN overrides that file, so CI
+# installs one minimal nightly and does not try to fetch the project's full
+# component list (rustc-dev, codegen-cranelift, ...).
+pkgname=gupax
+pkgver=2.0.2
+pkgrel=1
+pkgdesc='GUI Uniting P2Pool And XMRig'
+arch=('x86_64')
+url='https://github.com/gupax-io/gupax'
+license=('GPL-3.0-only')
+depends=('gcc-libs' 'glibc' 'libxkbcommon' 'wayland' 'libglvnd' 'fontconfig' 'openssl' 'hicolor-icon-theme' 'polkit')
+makedepends=('git' 'rustup')
+optdepends=(
+  'xmrig: RandomX CPU miner backend'
+  'p2pool: decentralized Monero mining pool backend'
+  'monerod: local Monero node backend'
+)
+provides=('gupax')
+conflicts=('gupax' 'gupax-bin' 'gupax-git')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz"
+        'gupax.desktop'
+        'wayland-app-id.patch')
+sha256sums=('855fb6f671b72cffd91ce0d01028636c07a123e1e54245936cda1ea667b3f388'
+            'ea0bde51dd5b35536ad50b01268b6a122b9e442a9fdd58ff326d6e4f8c77af46'
+            '621a3d19873bf33656d38d065f79fb6f092f4e5f253c6552a1d7866a308e7cec')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  # build.rs embeds `git rev-parse HEAD` and panics when there is no repo:
+  # the GitHub release tarball ships without .git, so seed one.
+  git init -q
+  git -c user.email=build@localhost -c user.name=build add -A
+  git -c user.email=build@localhost -c user.name=build commit -qm "v$pkgver"
+  # Wayland app_id, so the window can be matched to this .desktop entry's icon.
+  patch -Np1 -i "$srcdir/wayland-app-id.patch"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  # Ignore rust-toolchain.toml: CI installs exactly this toolchain with a
+  # minimal profile, and the file's component list would drag in rustc-dev etc.
+  export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-nightly-2025-11-12}"
+  export RUSTFLAGS="-C target-cpu=znver4 -C target-feature=+avx512f,+avx512vl,+avx512bw,+avx512dq -Zlocation-detail=none"
+  export CARGO_NET_RETRY=5
+  # makepkg exports CFLAGS with -O2/-flto; aws-lc-sys refuses to build its
+  # jitterentropy source under any optimisation (-O0 is mandatory), so the C
+  # deps get their own flags from cc-rs instead of the distro defaults.
+  export CFLAGS="" CXXFLAGS=""
+  cargo build --release --features distro
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 target/release/gupax "$pkgdir/usr/bin/gupax"
+  install -Dm644 assets/images/icons/icon.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/gupax.png"
+  install -Dm644 assets/images/icons/icon@2x.png "$pkgdir/usr/share/icons/hicolor/1024x1024/apps/gupax.png"
+  install -Dm755 assets/images/icons/icon.png "$pkgdir/usr/share/pixmaps/gupax.png"
+  install -Dm644 "$srcdir/gupax.desktop" "$pkgdir/usr/share/applications/gupax.desktop"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

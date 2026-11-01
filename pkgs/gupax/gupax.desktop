@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Gupax
+GenericName=Monero Miner GUI
+Comment=Mine Monero on decentralized P2Pool with XMRig
+Exec=gupax
+Icon=gupax
+Terminal=false
+Categories=Network;P2P;
+Keywords=monero;xmr;mining;miner;p2pool;xmrig;crypto;
+StartupNotify=true
+StartupWMClass=gupax

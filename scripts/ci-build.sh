@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# Builds packages and publishes them to the mayank-v4 release.
+# Builds one or more packages and uploads them to the mayank-v4 release.
 # Runs as the unprivileged `builder` user inside the Arch container.
 #
-# Sources:
-#   pkgs/<name>/          vendored recipe (AUR / custom)
-#   otherwise             Arch's official PKGBUILD, fetched from
-#                         gitlab.archlinux.org/archlinux/packaging/packages
+# Two modes:
+#   PUBLISH_DB=1 (default)  legacy single-job mode: build, publish db, state.
+#   PUBLISH_DB=0            matrix mode: build, upload package + signature only.
+#                           scripts/publish-db.sh owns the database afterwards.
+#
+# Recipes are never vendored for arch/aur/omarchy: they are fetched fresh on
+# every build (scripts/lib.sh), so an upstream version bump always arrives with
+# its matching PKGBUILD. Only `local:` specs live in pkgs/.
 #
 # Only CFLAGS differ from Arch: the workflow rewrites /etc/makepkg.conf to
 # -march=znver4, so Arch's own patches and dependency graph are reused
@@ -13,19 +17,30 @@
 # stock one without ever outranking a newer upstream version.
 set -uo pipefail
 
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# shellcheck source=lib.sh
+source scripts/lib.sh
+
 : "${REPO_NAME:?}" "${GH_REPO:?}" "${KEYID:?}"
 
-cd "${GITHUB_WORKSPACE:?}"
-mkdir -p repo out srcdest
+PUBLISH_DB=${PUBLISH_DB:-1}
+mkdir -p repo out srcdest work
 
 if [[ -z ${PKGS:-} ]]; then
-  PKGS=$(grep -vE '^[[:space:]]*(#|$)' packages.txt | tr '\n' ' ')
+  PKGS=$(pkg_specs | tr '\n' ' ')
 fi
 echo "packages: $PKGS"
+echo "mode: PUBLISH_DB=$PUBLISH_DB"
 
-# The runner is ephemeral: recover the current database and packages first,
-# otherwise each build publishes a database containing only its own package.
-gh release download "$REPO_NAME" --repo "$GH_REPO" --dir repo --skip-existing || true
+# In matrix mode every job only needs state.json (to decide whether to skip);
+# downloading the whole release per job would multiply the bandwidth by the
+# number of parallel jobs for no reason.
+if [[ $PUBLISH_DB == 1 ]]; then
+  gh release download "$REPO_NAME" --repo "$GH_REPO" --dir repo --skip-existing || true
+else
+  gh release download "$REPO_NAME" --repo "$GH_REPO" --dir repo \
+    --pattern state.json --skip-existing || true
+fi
 [[ -f repo/state.json ]] || echo '{}' >repo/state.json
 
 regenerate_db() {
@@ -96,10 +111,14 @@ except Exception:
 }
 
 ensure_release() {
-  gh release view "$REPO_NAME" --repo "$GH_REPO" >/dev/null 2>&1 ||
-    gh release create "$REPO_NAME" --repo "$GH_REPO" \
-      --title "mayank-v4 pacman repository" \
-      --notes "Signed x86-64-v4 packages built by GitHub Actions. pacman pulls updates through omarchy update."
+  gh release view "$REPO_NAME" --repo "$GH_REPO" >/dev/null 2>&1 && return 0
+  # Matrix jobs can race here; losing the create to a sibling is success, not
+  # failure, as long as the release exists afterwards.
+  gh release create "$REPO_NAME" --repo "$GH_REPO" \
+    --title "mayank-v4 pacman repository" \
+    --notes "Signed x86-64-v4 packages built by GitHub Actions. pacman pulls updates through omarchy update." \
+    >/dev/null 2>&1 || true
+  gh release view "$REPO_NAME" --repo "$GH_REPO" >/dev/null 2>&1
 }
 
 publish() { # publish <changed files...>
@@ -114,28 +133,16 @@ publish() { # publish <changed files...>
 
 fail=0
 built=""
-for pkg in $PKGS; do
-  echo "::group::build $pkg"
-  if [[ -d pkgs/$pkg ]]; then
-    src="$GITHUB_WORKSPACE/pkgs/$pkg"
-  else
-    src="$GITHUB_WORKSPACE/work/$pkg"
-    rm -rf "$src"; mkdir -p "$src"
-    if ! curl -sfL "https://gitlab.archlinux.org/archlinux/packaging/packages/$pkg/-/archive/main/$pkg-main.tar.gz" |
-         tar xz -C "$src" --strip-components=1; then
-      echo "::error::no packaging source for $pkg"
-      fail=1; echo "::endgroup::"; continue
-    fi
-    # Some packaging repositories nest the recipe one level deeper.
-    if [[ ! -f $src/PKGBUILD ]]; then
-      inner=$(find "$src" -maxdepth 2 -type f -name PKGBUILD -printf '%h\n' 2>/dev/null | head -1)
-      if [[ -n $inner ]]; then
-        src=$inner
-      else
-        echo "::error::$pkg has no PKGBUILD (stub package? see packages.txt)"
-        fail=1; echo "::endgroup::"; continue
-      fi
-    fi
+for spec in $PKGS; do
+  kind=$(pkg_kind "$spec")
+  pkg=$(pkg_name "$spec")
+  echo "::group::build $pkg ($kind)"
+  echo "building $spec"
+
+  src="$GITHUB_WORKSPACE/work/$pkg"
+  if ! fetch_recipe "$kind" "$pkg" "$src" "$GITHUB_WORKSPACE/work/.omarchy-pkgs"; then
+    echo "::error::could not fetch a recipe for $spec"
+    fail=1; echo "::endgroup::"; continue
   fi
 
   # "1" -> "1.1" so our build beats stock; an already-suffixed pkgrel is kept
@@ -150,9 +157,13 @@ for pkg in $PKGS; do
   # bumped pkgrel (1.2 vs computed 1.1) settle instead of rebuilding forever.
   state_ver=$(state_version "$pkg")
   computed="$pv-$pr"
+  asset_present=1
+  if [[ $PUBLISH_DB == 1 ]]; then
+    compgen -G "repo/${pkg}-*${pv}-*.pkg.tar.zst" >/dev/null || asset_present=0
+  fi
   if [[ ${FORCE:-0} != 1 && -n $state_ver ]] &&
      (( $(vercmp "$state_ver" "$computed") >= 0 )) &&
-     compgen -G "repo/${pkg}-*${pv}-*.pkg.tar.zst" >/dev/null; then
+     (( asset_present == 1 )); then
     echo "$pkg $state_ver already published; skipping"
     echo "::endgroup::"
     continue
@@ -186,6 +197,7 @@ for pkg in $PKGS; do
   done
 
   build_conf=/etc/makepkg.conf
+  extra_env=()
   case $pkg in
     # Some builds execute their own freshly compiled tools. V8 runs `torque`
     # and `mksnapshot` during `make`, and GitHub's runner pool mixes Intel
@@ -198,11 +210,18 @@ for pkg in $PKGS; do
       sed 's/-march=znver4/-march=x86-64-v3/g' /etc/makepkg.conf >"$build_conf"
       echo "$pkg: building for x86-64-v3 so build-time tools can execute on any runner"
       ;;
+    # Go ignores CFLAGS entirely; GOAMD64 is its equivalent of -march. v4 is
+    # the x86-64-v4 microarchitecture level (AVX-512), matching znver4.
+    cliamp)
+      extra_env=(GOAMD64=v4)
+      echo "$pkg: GOAMD64=v4 (Go has no CFLAGS)"
+      ;;
   esac
 
   build_log="$GITHUB_WORKSPACE/build-$pkg.log"
   makepkg_once() {
-    ( cd "$src" && PKGDEST="$GITHUB_WORKSPACE/out" SRCDEST="$GITHUB_WORKSPACE/srcdest" \
+    ( cd "$src" && env "${extra_env[@]}" \
+       PKGDEST="$GITHUB_WORKSPACE/out" SRCDEST="$GITHUB_WORKSPACE/srcdest" \
        RUSTFLAGS="-C target-cpu=znver4" CARGO_BUILD_JOBS="$(nproc)" \
        makepkg --config "$build_conf" -s --noconfirm --nocheck --cleanbuild --sign --key "$KEYID" "${pgp_flags[@]}" ) \
       2>&1 | tee -a "$build_log"
@@ -230,8 +249,7 @@ for pkg in $PKGS; do
     # GitHub release assets cannot contain ':' (package epochs) and silently
     # rewrite it to '.'. Record the sanitized name in the database, otherwise
     # pacman requests a filename that does not exist and the transaction fails.
-    safe_name="${f##*/}"
-    safe_name="${safe_name//:/}"
+    safe_name=$(sanitize_asset_name "${f##*/}")
     cp "$f" "repo/$safe_name"
     if [[ -f $f.sig ]]; then
       cp "$f.sig" "repo/$safe_name.sig"
@@ -239,6 +257,8 @@ for pkg in $PKGS; do
       echo "::error::makepkg produced no signature for $(basename "$f")"
     fi
     changed+=("repo/$safe_name")
+    # Report znver4 code generation; never fails unless STRICT_V4=1.
+    ./scripts/verify-v4.sh "repo/$safe_name" || fail=1
   done
 
   # Authoritative check: the pair we are about to upload must verify locally.
@@ -257,6 +277,23 @@ for pkg in $PKGS; do
     uploads+=("$f")
     [[ -f $f.sig ]] && uploads+=("$f.sig")
   done
+
+  if [[ $PUBLISH_DB == 0 ]]; then
+    # Matrix mode: package bytes only. publish-db.sh regenerates the database
+    # and state.json once, after every build job has finished.
+    ensure_release || { fail=1; echo "::endgroup::"; continue; }
+    up_ok=1
+    for f in "${uploads[@]}"; do upload_one "$f" || up_ok=0; done
+    rm -f out/*
+    if (( up_ok == 0 )); then
+      echo "::error::upload failed for $pkg"
+      fail=1; echo "::endgroup::"; continue
+    fi
+    built="$built $pkg"
+    rm -rf srcdest
+    echo "::endgroup::"
+    continue
+  fi
 
   python3 - "$pv-$pr" "$pkg" <<'PY'
 import json, sys
@@ -284,8 +321,9 @@ done
 echo "built:$built"
 
 # Always refresh the database once at the end, even when every package was
-# skipped, so it matches the assets actually present.
-if compgen -G "repo/*.pkg.tar.zst" >/dev/null; then
+# skipped, so it matches the assets actually present. Matrix mode leaves this
+# to publish-db.sh.
+if [[ $PUBLISH_DB == 1 ]] && compgen -G "repo/*.pkg.tar.zst" >/dev/null; then
   publish
 fi
 

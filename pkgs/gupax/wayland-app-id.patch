@@ -1,0 +1,13 @@
+--- a/src/inits.rs
++++ b/src/inits.rs
+@@ -102,6 +102,10 @@
+ #[inline(never)]
+ pub fn init_options(initial_window_size: Option<Vec2>) -> NativeOptions {
+     let mut options = eframe::NativeOptions::default();
++    // Wayland: without an app_id the compositor sees an empty window class, so
++    // the desktop entry's icon can never be matched to the window (dock, window
++    // switcher, taskbar grouping all show a generic icon).
++    options.viewport.app_id = Some("gupax".to_string());
+     options.viewport.min_inner_size = Some(Vec2::new(APP_MIN_WIDTH, APP_MIN_HEIGHT));
+     options.viewport.max_inner_size = Some(Vec2::new(APP_MAX_WIDTH, APP_MAX_HEIGHT));
+     options.viewport.inner_size = initial_window_size;
