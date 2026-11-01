@@ -64,7 +64,24 @@ build() {
   # Compile the Rust resource-monitor helper (and any other native pieces the
   # desktop artifact script needs) before packaging.
   pnpm build:resource-monitor
-  pnpm dist:desktop:linux
+
+  # Only the AppImage is needed for an Arch package. electron-builder is asked
+  # for AppImage *and* deb; its bundled fpm needs a portable Ruby runtime that
+  # fails to start here (exit 127), which aborts the whole build. Drop the deb
+  # target. The guard makes an upstream refactor fail loudly instead of silently
+  # building the wrong set.
+  if grep -q '\[target, "deb"\]' scripts/build-desktop-artifact.ts; then
+    sed -i 's/\[target, "deb"\]/[target]/' scripts/build-desktop-artifact.ts
+  fi
+  if grep -q '\[target, "deb"\]' scripts/build-desktop-artifact.ts; then
+    echo "could not drop the deb target; upstream changed" >&2
+    return 1
+  fi
+
+  # Upstream tags the release (v0.1.6) but the workspace package.json files
+  # still say 0.1.5 at that commit, so the artifact script would stamp the wrong
+  # version into the app and the AppImage name. Pass the tag version explicitly.
+  T3CODE_DESKTOP_VERSION="$pkgver" pnpm dist:desktop:linux
 }
 
 package() {
