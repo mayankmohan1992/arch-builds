@@ -219,10 +219,19 @@ for spec in $PKGS; do
   esac
 
   build_log="$GITHUB_WORKSPACE/build-$pkg.log"
+  # Rust ignores CFLAGS. This value is what actually applies the target CPU in
+  # two different situations:
+  #   * build_conf is /etc/makepkg.conf -> makepkg then also sources
+  #     ~/.makepkg.conf, and that file wins over the environment;
+  #   * build_conf is an override file (nodejs, the v3 retry) -> makepkg does
+  #     NOT source ~/.makepkg.conf at all, so this environment value is the
+  #     only thing that applies.
+  # Both are kept in sync, which is why fall_back_to_v3 rewrites both.
+  rust_flags="-C target-cpu=znver4"
   makepkg_once() {
     ( cd "$src" && env "${extra_env[@]}" \
        PKGDEST="$GITHUB_WORKSPACE/out" SRCDEST="$GITHUB_WORKSPACE/srcdest" \
-       RUSTFLAGS="-C target-cpu=znver4" CARGO_BUILD_JOBS="$(nproc)" \
+       RUSTFLAGS="$rust_flags" CARGO_BUILD_JOBS="$(nproc)" \
        makepkg --config "$build_conf" -s --noconfirm --nocheck --cleanbuild --sign --key "$KEYID" "${pgp_flags[@]}" ) \
       2>&1 | tee -a "$build_log"
   }
@@ -233,11 +242,9 @@ for spec in $PKGS; do
   # build script is compiled with RUSTFLAGS and then run - but C configure
   # probes hit it too. Falling back to x86-64-v3 (AVX2/BMI2/FMA, still far
   # above baseline) is what keeps a mixed runner pool from turning the repo red.
-  #
-  # RUSTFLAGS has to be rewritten in ~/.makepkg.conf, not exported: makepkg
-  # sources that file after the environment, so an exported value is ignored.
   fall_back_to_v3() {
     echo "::warning::$pkg: build-time tool SIGILL (runner has no AVX-512); rebuilding for x86-64-v3"
+    rust_flags="-C target-cpu=x86-64-v3"
     cat >"$HOME/.makepkg.conf" <<EOF
 RUSTFLAGS="-C force-frame-pointers=yes -C target-cpu=x86-64-v3"
 CARGO_BUILD_JOBS="$(nproc)"

@@ -50,7 +50,11 @@ build() {
   # Ignore rust-toolchain.toml: CI installs exactly this toolchain with a
   # minimal profile, and the file's component list would drag in rustc-dev etc.
   export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-nightly-2025-11-12}"
-  export RUSTFLAGS="-C target-cpu=znver4 -C target-feature=+avx512f,+avx512vl,+avx512bw,+avx512dq -Zlocation-detail=none"
+  # Keep whatever target CPU the build environment provides: znver4 normally,
+  # x86-64-v3 when the runner cannot execute AVX-512 and CI falls back. The
+  # only thing added here is the nightly-only size flag. Do not hardcode
+  # target-cpu here - it would silently defeat that fallback.
+  export RUSTFLAGS="${RUSTFLAGS:-} -Zlocation-detail=none"
   export CARGO_NET_RETRY=5
   # makepkg exports CFLAGS with -O2/-flto; aws-lc-sys refuses to build its
   # jitterentropy source under any optimisation (-O0 is mandatory), so the C
