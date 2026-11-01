@@ -86,7 +86,10 @@ if os.environ.get("PRUNE", "1") == "1":
             stale.append(r["file"])
 
 with open("repo/.prune", "w") as fh:
-    fh.write("\n".join(stale))
+    # Trailing newline matters: the shell loop reads this with `while read`,
+    # which silently drops a final line that has no terminator.
+    if stale:
+        fh.write("\n".join(stale) + "\n")
 print(f"publish-db: {len(stale)} superseded files to prune", file=sys.stderr)
 PY
 

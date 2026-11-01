@@ -178,19 +178,25 @@ user's GnuPG keyring. To rotate: generate a new key, update
 * `/var/cache/pacman/pkg` keeps the previous builds; `omarchy-snapshot` gives a
   bootable rollback.
 
-## Rust binaries: RUSTFLAGS comes from `~/.makepkg.conf`
+## Rust binaries: where RUSTFLAGS actually comes from
 
-`makepkg` sources the *builder's* `~/.makepkg.conf` **after** the system config,
-so `RUSTFLAGS` exported in the job environment is silently ignored. The
-workflow therefore writes:
+Rust ignores `CFLAGS`, so the target CPU has to be applied through `RUSTFLAGS`.
+Which of the two mechanisms wins depends on which config makepkg loaded — this
+is subtle and got it wrong once already:
 
-```sh
-/home/builder/.makepkg.conf
-RUSTFLAGS="-C force-frame-pointers=yes -C target-cpu=znver4"
-```
+| `--config` | `~/.makepkg.conf` sourced? | Effective RUSTFLAGS |
+|---|---|---|
+| `/etc/makepkg.conf` (default) | **yes**, and it overrides the environment | from `~/.makepkg.conf` |
+| an override file (nodejs, v3 retry) | **no** | from the environment |
 
-Without it, every cargo-built package (starship, tldr, usage, semver, librsvg,
-the artcraft apps, gliff) is baseline x86-64 even though CFLAGS say znver4.
+`makepkg`'s `source_makepkg_config()` only reads the user file when the config
+is the default `/etc/makepkg.conf`. So the workflow writes
+`/home/builder/.makepkg.conf` for the normal path **and** exports `RUSTFLAGS`
+for the override path, and `fall_back_to_v3` updates both.
+
+Without this, every cargo-built package (starship, tldr, usage, semver,
+librsvg, the artcraft apps, gliff, gupax) is baseline x86-64 even though CFLAGS
+say znver4.
 
 Never use `-C target-cpu=native` in CI: the runner is Zen 3 or Intel, and the
 artifact must target this machine.
