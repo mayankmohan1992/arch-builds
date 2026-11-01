@@ -167,10 +167,20 @@ jobs:
           # toolchain in rust-toolchain.toml. Install one minimal nightly; the
           # recipe sets RUSTUP_TOOLCHAIN so rustup does not try to fetch the
           # project's full component list (rustc-dev, codegen-cranelift, ...).
+          #
+          # Arch's rustup package does not create ~/.cargo/bin shims, so the
+          # toolchain binaries are linked into /usr/local/bin instead of relying
+          # on `rustup default` to provide a proxy.
           pacman -S --noconfirm --needed rustup >/dev/null
           runuser -u builder -- rustup toolchain install nightly-2025-11-12 --profile minimal
-          runuser -u builder -- rustup default nightly-2025-11-12
-          runuser -u builder -- /home/builder/.cargo/bin/rustc --version
+          tc_bin=$(ls -d /home/builder/.rustup/toolchains/nightly-2025-11-12-*/bin | head -1)
+          test -n "$tc_bin"
+          for b in cargo rustc rustdoc; do ln -sf "$tc_bin/$b" "/usr/local/bin/$b"; done
+          cargo --version
+          rustc --version
+          # Prove the toolchain can actually compile and link (sysroot intact).
+          printf 'fn main(){}\n' >/tmp/t.rs
+          rustc /tmp/t.rs -o /tmp/t && /tmp/t && echo "nightly toolchain usable"
 
       - name: Build ${{ matrix.pkg }}
         env:
