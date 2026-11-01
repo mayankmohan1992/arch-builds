@@ -19,3 +19,12 @@ id_ed25519*
 .npmrc
 .pypirc
 .netrc
+
+# makepkg build artifacts inside recipe directories
+pkgs/*/src/
+pkgs/*/pkg/
+pkgs/*/*.pkg.tar.zst
+pkgs/*/*.pkg.tar.zst.sig
+pkgs/*/*.tar.gz
+pkgs/*/*.tar.xz
+pkgs/*/*.tar.zst

@@ -94,6 +94,11 @@ local:xmrig-cuda-tuned
 # a local patch. Its build-time tools do not need nightly (we dropped
 # -Zlocation-detail=none so stable cargo works in CI).
 local:gupax
+# t3code: only -bin exists in the AUR (it repackages the released AppImage).
+# This recipe builds from the source tag instead, so the bundled Rust helper is
+# compiled for znver4. pkgs/t3code/TRACK makes it follow upstream releases
+# automatically: the latest GitHub tag becomes the pkgver at build time.
+local:t3code
 
 # --- Deliberately excluded ---------------------------------------------------
 # System-breaking: glibc, gcc/gcc-libs, binutils, base, filesystem,

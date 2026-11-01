@@ -22,6 +22,26 @@ pkg_specs() {
   grep -vE '^[[:space:]]*(#|$)' "${1:-packages.txt}"
 }
 
+# Latest release tag for a "github:owner/repo" tracker.
+# Uses gh when available (authenticated, 5000 req/h) and falls back to the
+# unauthenticated API. Prints nothing and returns 1 when it cannot be read.
+github_latest_tag() {
+  local repo=$1 tag=""
+  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    tag=$(gh api "repos/$repo/releases/latest" --jq .tag_name 2>/dev/null) || tag=""
+  fi
+  if [[ -z $tag ]]; then
+    tag=$(curl -sfL --max-time 30 "https://api.github.com/repos/$repo/releases/latest" |
+      python3 -c 'import json, sys
+try:
+    print(json.load(sys.stdin).get("tag_name", ""))
+except Exception:
+    print("")' 2>/dev/null) || tag=""
+  fi
+  [[ -n $tag ]] || return 1
+  printf '%s\n' "$tag"
+}
+
 # "aur:deckcraft" -> "aur";  "git" -> "arch"
 pkg_kind() {
   if [[ $1 == *:* ]]; then echo "${1%%:*}"; else echo arch; fi
@@ -91,11 +111,27 @@ PY
 # Print "<pkgver>-<pkgrel>" for a vendored recipe in pkgs/<name>.
 # No network: these are bumped by hand, so the checked-in file is the truth.
 local_version() {
-  local name=$1 f="pkgs/$1/PKGBUILD" v r
+  local name=$1 f="pkgs/$1/PKGBUILD" v r track tag
   [[ -f $f ]] || return 1
   v=$(awk -F= '/^pkgver=/{print $2; exit}' "$f")
   r=$(awk -F= '/^pkgrel=/{print $2; exit}' "$f")
   [[ -n $v && -n $r ]] || return 1
+
+  # A recipe with a TRACK file follows an upstream release stream: the newest
+  # tag wins over the checked-in pkgver, so the update timer dispatches a
+  # rebuild whenever upstream publishes. Trackers:
+  #   github:owner/repo   latest GitHub release tag (v-prefix stripped)
+  if [[ -f pkgs/$name/TRACK ]]; then
+    track=$(<"pkgs/$name/TRACK")
+    case $track in
+      github:*)
+        tag=$(github_latest_tag "${track#github:}") || return 1
+        printf '%s-%s\n' "${tag#v}" "$r"
+        return 0
+        ;;
+    esac
+  fi
+
   printf '%s-%s\n' "$v" "$r"
 }
 

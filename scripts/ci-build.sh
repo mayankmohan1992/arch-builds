@@ -145,6 +145,23 @@ for spec in $PKGS; do
     fail=1; echo "::endgroup::"; continue
   fi
 
+  # Tracked local recipes: take the version from the upstream release tag, so a
+  # new upstream release is built without editing anything by hand. Checksums in
+  # such recipes are SKIP and the source is fetched by tag over TLS.
+  if [[ $kind == local && -f $src/TRACK ]]; then
+    track=$(<"$src/TRACK")
+    case $track in
+      github:*)
+        if tag=$(github_latest_tag "${track#github:}"); then
+          sed -i -E "s/^pkgver=.*/pkgver=${tag#v}/" "$src/PKGBUILD"
+          echo "$pkg: upstream ${tag} -> pkgver ${tag#v}"
+        else
+          echo "::warning::$pkg: could not read the latest release tag; using the checked-in pkgver"
+        fi
+        ;;
+    esac
+  fi
+
   # "1" -> "1.1" so our build beats stock; an already-suffixed pkgrel is kept
   # so repeated runs are idempotent instead of drifting to 1.1.1.
   sed -i -E 's/^pkgrel=([0-9]+)$/pkgrel=\1.1/' "$src/PKGBUILD"
