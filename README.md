@@ -200,14 +200,19 @@ artifact must target this machine.
 * **Anything that runs its own freshly compiled output during the build.**
   GitHub's standard runners are AMD EPYC (Zen 3, no AVX-512), so a znver4
   binary SIGILLs ("Illegal instruction"). This is why `ruby` and
-  `libcloudproviders` are dropped.
+  `libcloudproviders` are dropped. Rust is the common case — every proc-macro
+  and build script is compiled with `RUSTFLAGS` and then executed — and C
+  `configure` probes hit it too. Those packages are not dropped: the build
+  retries automatically for `x86-64-v3` (AVX2/BMI2/FMA, still far above
+  baseline) when the log shows a SIGILL, so a mixed runner pool cannot turn the
+  repository red. `verify-v4.sh` reports which one you got.
 * **`nodejs`** is the same class: V8 runs `torque` and `mksnapshot` during
-  `make`. It is built for `x86-64-v3` (AVX2/BMI2) with `-mtune=znver4`, which
-  only affects scheduling. It still beats baseline x86-64, and it is the only
-  package in the set that is not v4.
+  `make`. It is built for `x86-64-v3` with `-mtune=znver4`, which only affects
+  scheduling. It still beats baseline x86-64, and it is the only package in the
+  set that never gets v4.
 * **`gupax`** needs nightly Rust (`#![feature(path_is_empty)]`). The matrix job
-  installs one minimal nightly and the recipe sets `RUSTUP_TOOLCHAIN` so rustup
-  does not try to fetch the project's full component list.
+  installs one minimal nightly and links it into `/usr/local/bin`, because
+  Arch's rustup package does not create `~/.cargo/bin` shims.
 * **`omarchy-hyprland-titlebars`** is a Hyprland plugin: it only loads into the
   exact Hyprland build it was compiled against, and the recipe pins
   `hyprland=0.57.0` while this machine runs 0.56.2 (`IgnorePkg = hyprland`).
