@@ -66,6 +66,15 @@ truth for a version.
   It compares `state.json` against each spec's upstream and dispatches a build
   **only** for packages that are missing or behind. When nothing moved, nothing
   is dispatched.
+* The timer reads `GH_TOKEN` from `~/.config/arch-builds/gh.env` (mode 600) via
+  `EnvironmentFile=`. This matters: `gh` normally keeps its token in the session
+  keyring, and a timer fires whether or not that keyring is unlocked. On
+  2026-11-02 the 20:26 run logged `gh not authenticated` and silently skipped a
+  cycle. With `GH_TOKEN` set, dispatching never depends on the login session.
+  To rotate, replace the token in that file; a repo-scoped fine-grained PAT with
+  `Actions: write` is enough.
+* `local:` specs are tracked from their checked-in PKGBUILD: bump `pkgver` and
+  the next timer run picks it up.
 * `local:` specs are skipped by the timer: they have no upstream to ask, and
   are bumped by hand.
 * A GitHub `schedule:` is deliberately not used: GitHub disables scheduled

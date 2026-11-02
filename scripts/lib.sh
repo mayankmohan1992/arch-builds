@@ -175,7 +175,20 @@ fetch_recipe() {
       ;;
     local)
       [[ -d pkgs/$name ]] || return 1
-      cp -a "pkgs/$name/." "$dest"/ || return 1
+      # Copy only what is tracked by git. Recipe directories accumulate
+      # makepkg output (a t3code package is 190 MB, its source tarball 117 MB,
+      # plus src/ and pkg/), and those are gitignored - copying them into every
+      # CI workspace wastes minutes and disk for nothing.
+      if git rev-parse --git-dir >/dev/null 2>&1 &&
+         [[ -n $(git ls-files "pkgs/$name") ]]; then
+        while IFS= read -r -d '' f; do
+          local rel=${f#pkgs/$name/}
+          mkdir -p "$dest/$(dirname "$rel")"
+          cp "$f" "$dest/$rel" || return 1
+        done < <(git ls-files -z "pkgs/$name")
+      else
+        cp -a "pkgs/$name/." "$dest"/ || return 1
+      fi
       ;;
     *)
       return 1
