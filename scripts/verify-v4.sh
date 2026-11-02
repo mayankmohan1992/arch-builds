@@ -63,7 +63,7 @@ while IFS= read -r -d '' f; do
   zmm_total=$((zmm_total + z))
   ymm_total=$((ymm_total + y))
   audited=$((audited + 1))
-done < <(find "$work" -type f \( -path '*/usr/bin/*' -o -path '*/usr/lib/*' -o -path '*/usr/lib64/*' \) -print0 2>/dev/null)
+done < <(find "$work" -type f \( -path '*/usr/bin/*' -o -path '*/usr/lib/*' -o -path '*/usr/lib64/*' -o -path '*/opt/*' \) -print0 2>/dev/null)
 
 echo "verify-v4: $name  files=$audited skipped=$skipped  zmm=$zmm_total ymm=$ymm_total"
 
