@@ -44,7 +44,7 @@ depends=(
 optdepends=('openai-codex: use the system-installed Codex CLI')
 provides=("t3code=$pkgver")
 conflicts=('t3code-bin' 't3code-nightly-bin')
-makedepends=('nodejs' 'pnpm' 'rust' 'git')
+makedepends=('nodejs' 'pnpm' 'rust' 'git' 'imagemagick')
 options=('!debug' '!strip')
 # The tarball is pinned by tag over TLS rather than hashed: the version is
 # bumped by CI from the upstream release tag, so a static checksum cannot be
