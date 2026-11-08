@@ -9,6 +9,7 @@ set -euo pipefail
 REPO=mayank-v4
 OWNER_REPO=mayankmohan1992/arch-builds
 BASE="https://github.com/$OWNER_REPO/releases/download/$REPO"
+BASE_LATEST="https://github.com/$OWNER_REPO/releases/latest/download"
 CONF=/etc/pacman.conf
 KEYFILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/keys/$REPO.asc"
 
@@ -44,14 +45,32 @@ pacman-key --add "$KEYFILE"
 pacman-key --lsign-key "$(gpg --show-keys --with-colons "$KEYFILE" | awk -F: '/^fpr:/{print $10; exit}')"
 
 if grep -q "^\[$REPO\]" "$CONF"; then
-  echo "==> [$REPO] already configured"
+  if grep -qxF "Server = $BASE_LATEST" "$CONF"; then
+    echo "==> [$REPO] already configured"
+  else
+    # Older installs have only the pinned-tag Server. Add the fallback so a
+    # GitHub outage on that endpoint (2026-11-08: 504 for every repository)
+    # does not stop `omarchy update` at database sync.
+    echo "==> [$REPO] present; adding the latest-release fallback endpoint"
+    cp -a "$CONF" "$CONF.pre-$REPO-$(date +%Y%m%d-%H%M%S)"
+    tmp=$(mktemp)
+    awk -v r="$REPO" -v latest="$BASE_LATEST" '
+      $0 == "[" r "]" { in_stanza = 1; print; next }
+      in_stanza && /^\[/ { in_stanza = 0 }
+      in_stanza && !added && /^Server = / { print; print "Server = " latest; added = 1; next }
+      { print }
+    ' "$CONF" >"$tmp"
+    install -m644 "$tmp" "$CONF"
+    rm -f "$tmp"
+  fi
 else
   cp -a "$CONF" "$CONF.pre-$REPO-$(date +%Y%m%d-%H%M%S)"
   tmp=$(mktemp)
-  awk -v r="$REPO" -v base="$BASE" '
+  awk -v r="$REPO" -v base="$BASE" -v latest="$BASE_LATEST" '
     /^\[core\]$/ && !done {
       print "[" r "]"
       print "Server = " base
+      print "Server = " latest
       print "SigLevel = Required DatabaseRequired"
       print ""
       done = 1

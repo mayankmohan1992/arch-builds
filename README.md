@@ -88,7 +88,12 @@ truth for a version.
   workflows in public repositories after 60 days without repository activity.
 * Nothing needs to be run locally to receive updates; `omarchy update` is enough.
 * `~/.config/omarchy/hooks/pre-refresh-pacman.d/20-mayank-v4.sh` re-adds the
-  repository stanza if Omarchy ever rewrites `pacman.conf`.
+  repository stanza if Omarchy ever rewrites `pacman.conf`. It writes two
+  `Server` lines: the pinned `releases/download/mayank-v4` endpoint and
+  `releases/latest/download` as a fallback. On 2026-11-08 GitHub's pinned-tag
+  release endpoint returned 504 for every repository (ripgrep included) while
+  `latest/download` kept working, and a single Server meant `omarchy update`
+  could not sync the database. pacman moves to the next Server when one fails.
 
 Run it by hand at any time:
 
