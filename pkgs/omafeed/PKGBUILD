@@ -227,6 +227,15 @@ PY
   return 0
 }
 
+prepare() {
+  cd "$pkgname-$pkgver"
+
+  # `cargo build --frozen` is offline, so every crate must already be in the
+  # cache. Fetch for all targets: cheaper in failures than --target, and the
+  # workspace is a single Linux desktop app either way.
+  cargo fetch --locked
+}
+
 build() {
   cd "$pkgname-$pkgver"
 
