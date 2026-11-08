@@ -45,7 +45,7 @@ sha256sums=('SKIP')
 # search index, the fuzzy matcher, and the HTML sanitizer + text extractor.
 _pgo_train() {
   local bin=$1 home=$srcdir/pgo-home www=$srcdir/pgo-www port
-
+ 
   rm -rf "$home" "$www"
   mkdir -p "$home" "$www"
 
@@ -184,6 +184,11 @@ PY
   done
 
   export OMAFEED_HOME="$home"
+  # rustc's default profraw name is the same for every process, so consecutive
+  # CLI invocations overwrite each other and llvm-profdata merges a single run.
+  # %p gives one file per invocation, which is what makes the profile cover the
+  # whole workload instead of whichever command ran last.
+  export LLVM_PROFILE_FILE="$profdir/%m_%p.profraw"
   "$bin" import "$www/subscriptions.opml" >/dev/null || return 1
 
   local pass id ids
@@ -223,7 +228,7 @@ PY
   kill "$server" 2>/dev/null || true
   wait "$server" 2>/dev/null || true
   trap - RETURN
-  unset OMAFEED_HOME
+  unset OMAFEED_HOME LLVM_PROFILE_FILE
   return 0
 }
 
