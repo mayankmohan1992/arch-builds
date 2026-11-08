@@ -74,9 +74,16 @@ truth for a version.
   To rotate, replace the token in that file; a repo-scoped fine-grained PAT with
   `Actions: write` is enough.
 * `local:` specs are tracked from their checked-in PKGBUILD: bump `pkgver` and
-  the next timer run picks it up.
-* `local:` specs are skipped by the timer: they have no upstream to ask, and
-  are bumped by hand.
+  the next timer run picks it up. A `pkgs/<name>/TRACK` file containing
+  `github:owner/repo` makes the recipe follow upstream releases instead, so the
+  newest tag becomes the `pkgver` at build time (`local:t3code`,
+  `local:omafeed`).
+* `~/.config/omarchy/hooks/post-update.d/40-arch-builds-check.sh` runs
+  `check-upstream.sh` at the end of every `omarchy update`. When Omarchy ships a
+  package version that outranks our `pkgrel .1` build (which pacman correctly
+  prefers), the rebuild is dispatched during that same update instead of
+  waiting up to 6 hours for the timer, and the next `omarchy update` installs
+  the optimised build.
 * A GitHub `schedule:` is deliberately not used: GitHub disables scheduled
   workflows in public repositories after 60 days without repository activity.
 * Nothing needs to be run locally to receive updates; `omarchy update` is enough.
@@ -126,6 +133,40 @@ semver    zmm=0       Rust, too small to vectorise
 Zero is legitimate for Go and tiny binaries, so the audit warns rather than
 fails. The hard gate is in the workflow: the run fails early if `-march=znver4`
 or `target-cpu=znver4` ever stops landing in the config files.
+
+## omafeed: fat LTO + PGO
+
+`pkgs/omafeed` is the one recipe that changes more than the CPU target, because
+its upstream recipe stops at `cargo build --release`:
+
+| Layer | Upstream/Omarchy | Here |
+|---|---|---|
+| target CPU | baseline `x86-64` | `-C target-cpu=znver4` (from `RUSTFLAGS`) |
+| LTO | thin | `lto = "fat"` |
+| codegen units | 16 (default) | 1 |
+| profile-guided | no | yes, trained on the CLI |
+
+Pass 1 builds an instrumented binary. `_pgo_train()` then generates a small
+library (RSS 2.0, Atom, JSON Feed, one broken feed), serves it over loopback,
+imports it and runs the real CLI against it: `refresh` (including conditional
+re-requests), `feeds`, `status`, `articles` in every scope, fuzzy and `--exact`
+`search`, `article --html` and the plain-text extractor, read/star toggles and
+OPML export. Pass 2 rebuilds with `-Cprofile-use`. If instrumentation, training,
+`llvm-profdata` or the profile-use rebuild fails for any reason, the build falls
+back to the same fat-LTO build without profile data rather than failing the
+matrix.
+
+`/usr/share/doc/omafeed/build-optimization.txt` records which path was taken, so
+the installed package can be audited:
+
+```sh
+cat /usr/share/doc/omafeed/build-optimization.txt
+```
+
+The recipe also refuses to package an XDG autostart entry, a systemd user unit
+or a unit preset. omafeed has no daemon and no login hook: it runs only when
+started by hand from the launcher or `omafeed`. The companion bar plugin is a
+separate package and is not installed by this recipe.
 
 ## Free-tier notes
 

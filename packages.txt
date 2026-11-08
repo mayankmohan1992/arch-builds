@@ -99,6 +99,13 @@ local:gupax
 # compiled for znver4. pkgs/t3code/TRACK makes it follow upstream releases
 # automatically: the latest GitHub tag becomes the pkgver at build time.
 local:t3code
+# omafeed: the Rust RSS reader Omarchy ships. Its own recipe stops at
+# `cargo build --release` (thin LTO over 16 codegen units); this one adds fat
+# LTO + one codegen unit and PGO trained on the real CLI, on top of
+# RUSTFLAGS=-C target-cpu=znver4. TRACK follows pch/omafeed releases, so a new
+# version is rebuilt without touching anything. Installs no autostart entry or
+# service: the app only runs when launched by hand.
+local:omafeed
 
 # --- Deliberately excluded ---------------------------------------------------
 # System-breaking: glibc, gcc/gcc-libs, binutils, base, filesystem,

@@ -1,0 +1,307 @@
+# Maintainer: mayank <https://github.com/mayankmohan1992>
+#
+# omafeed, rebuilt for this machine (Ryzen 5 7600 / Zen 4) from upstream's own
+# release tag. Same source, same version, same ABI as the [omarchy] package;
+# only the code generation differs.
+#
+# Why a vendored recipe instead of `omarchy:omafeed`:
+#   * the upstream/Omarchy recipe stops at `cargo build --release`, which uses
+#     Cargo's default release profile: thin LTO over 16 codegen units;
+#   * this recipe adds fat LTO + one codegen unit, and profile-guided
+#     optimisation (PGO) trained on the real CLI, on top of the target CPU that
+#     arch-builds' RUSTFLAGS already sets (`-C target-cpu=znver4`);
+#   * the recipe is version-tracked by pkgs/omafeed/TRACK, so a new
+#     pch/omafeed release is built automatically.
+#
+# The package installs exactly what upstream installs: the binary, the desktop
+# entry, the metainfo XML, the icon and the licence. It deliberately does NOT
+# install an autostart entry, a systemd user unit, or a launcher for the
+# companion bar plugin: omafeed only runs when it is started by hand.
+
+pkgname=omafeed
+pkgver=0.2.8
+pkgrel=1
+pkgdesc='A native Rust RSS reader for Linux and Omarchy'
+arch=('x86_64')
+url='https://github.com/pch/omafeed'
+license=('MIT')
+depends=('glib2' 'glibc' 'gtk4' 'hicolor-icon-theme' 'libadwaita' 'libgcc' 'webkitgtk-6.0')
+makedepends=('cargo' 'curl' 'pkgconf' 'python' 'llvm')
+# makepkg's LTO flags turn bundled C code (SQLite, ring) into GCC bytecode rustc
+# cannot link. Rust LTO is enabled through the Cargo profile below instead, and
+# the release profile already strips, so a debug package would be empty.
+options=('!lto' '!debug')
+# The tarball is pinned by tag over TLS rather than hashed: TRACK bumps pkgver
+# to the newest upstream release, so a static checksum cannot be maintained.
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+# Set to 1 by build() when the profile-guided rebuild succeeded (via
+# .pgo-status in $srcdir); reported in the build info file.
+
+# Generates a small but realistic library and serves it over loopback, so the
+# instrumented binary exercises the paths that matter for an RSS reader:
+# HTTP + conditional requests, RSS/Atom/JSON parsing, SQLite writes, the FTS
+# search index, the fuzzy matcher, and the HTML sanitizer + text extractor.
+_pgo_train() {
+  local bin=$1 home=$srcdir/pgo-home www=$srcdir/pgo-www port
+
+  rm -rf "$home" "$www"
+  mkdir -p "$home" "$www"
+
+  # Ask the kernel for a free port, then close it and let python reuse it.
+  port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+
+  python3 - "$www" "$port" <<'PY'
+import base64, html, json, os, sys
+from email.utils import format_datetime
+from datetime import datetime, timedelta, timezone
+
+www, port = sys.argv[1], sys.argv[2]
+base = f"http://127.0.0.1:{port}"
+now = datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc)
+words = ("rust async database sqlite sanitizer feed reader thread tokio gtk "
+         "webkit article search index parser network cache schema worker").split()
+
+# A 1x1 PNG: enough for the image loader to do real work without WebKit.
+png = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
+for i in range(4):
+    with open(os.path.join(www, f"img-{i}.png"), "wb") as fh:
+        fh.write(png)
+with open(os.path.join(www, "frame.html"), "w") as fh:
+    fh.write("<!doctype html><title>frame</title><p>frame</p>")
+with open(os.path.join(www, "page.html"), "w") as fh:
+    fh.write("<!doctype html><title>page</title><p>page</p>")
+
+def rich(i):
+    a, b = words[i % len(words)], words[(i * 7 + 3) % len(words)]
+    return f"""<h2>Notes on {a}</h2>
+<p>An intro paragraph about <strong>{a}</strong> and <em>{b}</em> with
+<code>inline_{i}()</code> and a <a href="{base}/page.html?{i}">reference link</a>.</p>
+<ul><li>first {a} point</li><li>second point<ul><li>nested {b} point</li></ul></li></ul>
+<ol><li>step one</li><li>step two</li></ol>
+<blockquote><p>A quotation about {b} that the reader must keep.</p></blockquote>
+<pre><code class="language-rust">fn article_{i}() {{ let x = {i}; println!("{{x}}"); }}</code></pre>
+<table><thead><tr><th>key</th><th>value</th></tr></thead>
+<tbody><tr><td>{a}</td><td>{b}</td></tr></tbody></table>
+<p><img src="{base}/img-{i % 4}.png" alt="diagram {i}"></p>
+<script>console.log("stripped")</script>
+<iframe src="{base}/frame.html"></iframe>
+<form action="{base}/submit"><input name="q"></form>
+<p>Unicode: caf&eacute; &mdash; na&iuml;ve &mdash; &#26085;&#26412;&#35486;.</p>
+"""
+
+# --- RSS 2.0 -------------------------------------------------------------
+items = []
+for i in range(60):
+    ts = now - timedelta(hours=i * 3)
+    a, b = words[i % len(words)], words[(i * 5 + 1) % len(words)]
+    items.append(f"""<item>
+<title>{html.escape(a.title())} {i}: {b} in practice</title>
+<link>{base}/rss/{i}</link><guid isPermaLink="false">rss-{i}</guid>
+<pubDate>{format_datetime(ts)}</pubDate>
+<description>Summary about {a} and {b}.</description>
+<content:encoded><![CDATA[{rich(i)}]]></content:encoded>
+</item>""")
+rss = f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+<channel><title>Rust Blog</title><link>{base}/</link>
+<description>Rust news</description>
+{''.join(items)}
+</channel></rss>"""
+
+# --- Atom ----------------------------------------------------------------
+entries = []
+for i in range(60):
+    ts = now - timedelta(hours=i * 2, minutes=17)
+    a, b = words[(i * 3) % len(words)], words[(i * 11 + 2) % len(words)]
+    entries.append(f"""<entry>
+<title>Async {a} part {i}</title>
+<id>urn:atom:{i}</id><link href="{base}/atom/{i}"/>
+<updated>{ts.isoformat()}</updated>
+<author><name>Writer {i}</name></author>
+<summary>Atom summary about {a}.</summary>
+<content type="html">{html.escape(rich(i))}</content>
+</entry>""")
+atom = f"""<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+<title>Async Weekly</title><id>urn:atom:feed</id>
+<link href="{base}/atom"/><updated>{now.isoformat()}</updated>
+{''.join(entries)}
+</feed>"""
+
+# --- JSON Feed -----------------------------------------------------------
+jitems = []
+for i in range(60):
+    ts = now - timedelta(days=i % 30, minutes=i)
+    a, b = words[(i * 13 + 5) % len(words)], words[(i * 17 + 7) % len(words)]
+    jitems.append({
+        "id": f"json-{i}",
+        "url": f"{base}/json/{i}",
+        "title": f"Database {a} {i}: {b}",
+        "content_html": rich(i),
+        "summary": f"JSON summary about {a} and {b}.",
+        "date_published": ts.isoformat(),
+        "authors": [{"name": f"Author {i}"}],
+    })
+jsonfeed = {
+    "version": "https://jsonfeed.org/version/1.1",
+    "title": "Database Notes",
+    "home_page_url": f"{base}/json",
+    "items": jitems,
+}
+
+for name, data in (("rust.xml", rss), ("async.xml", atom),
+                   ("database.json", json.dumps(jsonfeed))):
+    with open(os.path.join(www, name), "w", encoding="utf-8") as fh:
+        fh.write(data)
+
+opml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0"><head><title>PGO</title></head><body>
+<outline text="PGO">
+<outline type="rss" text="Rust Blog" title="Rust Blog" xmlUrl="{base}/rust.xml"/>
+<outline type="rss" text="Async Weekly" title="Async Weekly" xmlUrl="{base}/async.xml"/>
+<outline type="rss" text="Database Notes" title="Database Notes" xmlUrl="{base}/database.json"/>
+<outline type="rss" text="Broken" title="Broken" xmlUrl="{base}/missing.xml"/>
+</outline></body></opml>"""
+with open(os.path.join(www, "subscriptions.opml"), "w", encoding="utf-8") as fh:
+    fh.write(opml)
+PY
+
+  python3 -m http.server "$port" --bind 127.0.0.1 --directory "$www" \
+    >/dev/null 2>&1 &
+  local server=$!
+  # Never leave the server behind, however this function exits.
+  trap 'kill '"$server"' 2>/dev/null || true' RETURN
+
+  local n=0
+  until curl -sf "http://127.0.0.1:$port/rust.xml" -o /dev/null; do
+    n=$((n + 1))
+    (( n < 50 )) || { echo "PGO: training server did not start" >&2; return 1; }
+    sleep 0.1
+  done
+
+  export OMAFEED_HOME="$home"
+  "$bin" import "$www/subscriptions.opml" >/dev/null || return 1
+
+  local pass id ids
+  for pass in 1 2 3; do
+    # Pass 1 fetches; passes 2-3 revalidate (conditional requests, 304 paths).
+    "$bin" refresh >/dev/null 2>&1 || true
+    "$bin" feeds --json >/dev/null || return 1
+    "$bin" status >/dev/null || return 1
+
+    "$bin" articles --scope all --limit 250 --json >/dev/null || return 1
+    "$bin" articles --scope all --limit 100 --offset 100 >/dev/null || true
+    "$bin" articles --scope unread --limit 200 --json >/dev/null || return 1
+    "$bin" articles --scope starred --limit 50 --json >/dev/null || true
+    "$bin" articles --scope today --limit 50 --json >/dev/null || true
+
+    # Fuzzy search (typo, plural and prefix expansion) and exact search.
+    "$bin" search rust async --limit 200 --json >/dev/null || return 1
+    "$bin" search "databse sanitizr" --limit 100 >/dev/null || true
+    "$bin" search database --exact --limit 100 --json >/dev/null || true
+
+    # HTML sanitizing and text extraction are the heaviest Rust-side reader paths.
+    ids=$("$bin" articles --scope all --limit 40 --json |
+      python3 -c 'import json,sys; print(" ".join(str(a["id"]) for a in json.load(sys.stdin)["articles"]))')
+    for id in $ids; do
+      "$bin" article "$id" --html >/dev/null || true
+      "$bin" article "$id" >/dev/null || true
+    done
+
+    # State changes, bulk paths, and OPML export.
+    "$bin" star $ids >/dev/null 2>&1 || true
+    "$bin" unstar $ids >/dev/null 2>&1 || true
+    "$bin" read $ids >/dev/null 2>&1 || true
+    "$bin" unread $ids >/dev/null 2>&1 || true
+    "$bin" export "$home/export-$pass.opml" >/dev/null 2>&1 || true
+  done
+
+  kill "$server" 2>/dev/null || true
+  wait "$server" 2>/dev/null || true
+  trap - RETURN
+  unset OMAFEED_HOME
+  return 0
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+
+  # Relative, because `make install` in package() expects target/release next
+  # to the Makefile.
+  export CARGO_TARGET_DIR=target
+  # makepkg sources RUSTFLAGS from makepkg.conf (arch-builds writes
+  # `-C force-frame-pointers=yes -C target-cpu=znver4`). Keep it and add to it;
+  # never replace it, or the build silently loses the target CPU.
+  local base=${RUSTFLAGS:-}
+  local -a profile=(
+    --config 'profile.release.opt-level=3'
+    --config 'profile.release.lto="fat"'
+    --config 'profile.release.codegen-units=1'
+  )
+
+  msg2 "RUSTFLAGS: $base"
+  [[ $base == *target-cpu=* ]] ||
+    warning "RUSTFLAGS has no -C target-cpu=...; this build is not machine-optimised"
+
+  local profdir="$srcdir/pgo-prof" merged="$srcdir/pgo-prof/merged.profdata"
+  rm -rf "$profdir"
+  mkdir -p "$profdir"
+  printf '0' >"$srcdir/.pgo-status"
+  printf '%s\n' "$base" >"$srcdir/.pgo-flags"
+
+  # Pass 1: instrumented binary, then a training run on real CLI workloads.
+  if RUSTFLAGS="$base -Cprofile-generate=$profdir" \
+       cargo build --frozen --release "${profile[@]}" &&
+     _pgo_train "$PWD/target/release/omafeed"; then
+    if llvm-profdata merge -o "$merged" "$profdir"/*.profraw &&
+       RUSTFLAGS="$base -Cprofile-use=$merged -Cllvm-args=-pgo-warn-missing-function" \
+         cargo build --frozen --release "${profile[@]}"; then
+      printf '1' >"$srcdir/.pgo-status"
+      msg2 "PGO profile merged from $(find "$profdir" -name '*.profraw' | wc -l) runs"
+      return 0
+    fi
+    warning "PGO rebuild failed; falling back to a profile-less optimised build"
+  else
+    warning "PGO instrumentation/training failed; falling back to a profile-less optimised build"
+  fi
+
+  # Fallback: still fat LTO + one codegen unit, just without profile data.
+  # RUSTFLAGS must differ from the instrumented run so cargo rebuilds instead
+  # of leaving the (much slower) instrumented binary in place.
+  RUSTFLAGS="$base" cargo build --frozen --release "${profile[@]}"
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+
+  make install DESTDIR="$pkgdir" PREFIX=/usr PKGNAME="$pkgname"
+
+  install -Dm644 /dev/stdin "$pkgdir/usr/share/doc/$pkgname/build-optimization.txt" <<EOF
+Built by arch-builds (mayank-v4), $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+  pkgver            $pkgver-$pkgrel
+  rustflags         $(cat "$srcdir/.pgo-flags" 2>/dev/null || echo unknown)
+  profile           opt-level=3, lto=fat, codegen-units=1
+  profile-guided    $(sed 's/^1$/yes/; s/^0$/no/' "$srcdir/.pgo-status" 2>/dev/null || echo no)
+  upstream recipe   https://github.com/omacom/omarchy-pkgs (pkgbuilds/omafeed)
+EOF
+
+  # This package must never start on boot or at login: no XDG autostart entry,
+  # no systemd user unit, no Omarchy/Hyprland autostart hook. omafeed runs only
+  # when the user launches it.
+  if find "$pkgdir" \( -path '*/xdg/autostart/*' -o -path '*/systemd/user/*' \
+       -o -path '*/systemd/user-preset/*' -o -name '*.service' \
+       -o -name '*.timer' \) -print -quit | grep -q .; then
+    error "refusing to package an autostart entry or service/timer"
+    return 1
+  fi
+  if grep -rlE '^(X-GNOME-Autostart|Hidden=true|Autostart)' \
+       "$pkgdir/usr/share/applications" >/dev/null 2>&1; then
+    error "refusing to package a desktop entry that autostarts"
+    return 1
+  fi
+}
