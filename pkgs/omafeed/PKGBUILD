@@ -274,8 +274,17 @@ build() {
     --config 'profile.release.codegen-units=1'
   )
 
+  # Sublibraries built from C (bundled SQLite, ring) follow CFLAGS, not
+  # RUSTFLAGS. makepkg's CFLAGS say znver4, and the training binary is executed,
+  # so pass 1 must compile those C parts for x86-64-v3 too or the instrumented
+  # app dies on the first SQLite call (it did: SIGILL in `import`).
+  local cflags_saved=${CFLAGS-} cxxflags_saved=${CXXFLAGS-} cflags_training
+  cflags_training=$(sed -E 's/-march=[^ ]+/-march=x86-64-v3/' <<<"${CFLAGS:--O2 -pipe}")
+  [[ $cflags_training == *-march=* ]] || cflags_training="$cflags_training -march=x86-64-v3"
+
   msg2 "target flags (final):   $final_flags"
   msg2 "target flags (training): $inst_flags"
+  msg2 "CFLAGS   (training):    $cflags_training"
   [[ $final_flags == *target-cpu=znver4* ]] ||
     warning "final RUSTFLAGS have no -C target-cpu=znver4; this build is not v4"
 
@@ -286,9 +295,12 @@ build() {
   printf '%s\n' "$final_flags" >"$srcdir/.pgo-flags"
 
   # Pass 1: v3 instrumented binary, trained on the real CLI.
+  export CFLAGS="$cflags_training" CXXFLAGS="$cflags_training"
   if RUSTFLAGS="$inst_flags -Cprofile-generate=$profdir" \
        cargo build --frozen --release --target "$triple" "${profile[@]}" &&
      _pgo_train "$PWD/target/$triple/release/omafeed"; then
+    # Pass 2 is never executed here, so it can be the real thing.
+    export CFLAGS="$cflags_saved" CXXFLAGS="$cxxflags_saved"
     if llvm-profdata merge -o "$merged" "$profdir"/*.profraw &&
        RUSTFLAGS="$final_flags -Cprofile-use=$merged -Cllvm-args=-pgo-warn-missing-function" \
          cargo build --frozen --release --target "$triple" "${profile[@]}"; then
@@ -299,6 +311,7 @@ build() {
     warning "PGO rebuild failed; falling back to a profile-less optimised build"
   else
     warning "PGO instrumentation/training failed; falling back to a profile-less optimised build"
+    export CFLAGS="$cflags_saved" CXXFLAGS="$cxxflags_saved"
   fi
 
   # Fallback: still fat LTO + one codegen unit + znver4, just without profile

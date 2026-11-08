@@ -165,7 +165,10 @@ x86-64-v3 for that reason). With `--target`, build scripts and proc macros are
 host units with no `target-cpu` flag, so they run anywhere, while the app and
 its dependencies still get AVX-512. The training binary is built for
 x86-64-v3 for the same reason; the profile it records is target-independent and
-is applied to the znver4 rebuild.
+is applied to the znver4 rebuild. `CFLAGS` are switched to `-march=x86-64-v3`
+for that pass too, because the C code cargo builds (bundled SQLite, ring)
+follows `CFLAGS` rather than `RUSTFLAGS`; with znver4 C flags the instrumented
+app died with SIGILL on the first SQLite call.
 
 `/usr/share/doc/omafeed/build-optimization.txt` records which path was taken, so
 the installed package can be audited:
