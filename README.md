@@ -156,6 +156,17 @@ OPML export. Pass 2 rebuilds with `-Cprofile-use`. If instrumentation, training,
 back to the same fat-LTO build without profile data rather than failing the
 matrix.
 
+Every cargo call passes `--target x86_64-unknown-linux-gnu` explicitly, and that
+is what makes a znver4 build possible on GitHub at all. Without it, Cargo
+compiles build scripts and proc macros with the same `RUSTFLAGS` as the app; a
+znver4 `proc-macro2` build script is then *executed* on the runner and dies with
+SIGILL on EPYC Zen 3 (the first attempt of this recipe silently fell back to
+x86-64-v3 for that reason). With `--target`, build scripts and proc macros are
+host units with no `target-cpu` flag, so they run anywhere, while the app and
+its dependencies still get AVX-512. The training binary is built for
+x86-64-v3 for the same reason; the profile it records is target-independent and
+is applied to the znver4 rebuild.
+
 `/usr/share/doc/omafeed/build-optimization.txt` records which path was taken, so
 the installed package can be audited:
 

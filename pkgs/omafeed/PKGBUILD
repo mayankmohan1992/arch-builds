@@ -231,44 +231,67 @@ prepare() {
   cd "$pkgname-$pkgver"
 
   # `cargo build --frozen` is offline, so every crate must already be in the
-  # cache. Fetch for all targets: cheaper in failures than --target, and the
-  # workspace is a single Linux desktop app either way.
-  cargo fetch --locked
+  # cache. Fetch for the explicit target used below.
+  cargo fetch --locked --target "$CARCH-unknown-linux-gnu"
 }
 
 build() {
   cd "$pkgname-$pkgver"
 
-  # Relative, because `make install` in package() expects target/release next
-  # to the Makefile.
+  # Relative, because `make install` in package() expects target/ next to the
+  # Makefile.
   export CARGO_TARGET_DIR=target
+  local triple="$CARCH-unknown-linux-gnu"
+
   # makepkg sources RUSTFLAGS from makepkg.conf (arch-builds writes
-  # `-C force-frame-pointers=yes -C target-cpu=znver4`). Keep it and add to it;
-  # never replace it, or the build silently loses the target CPU.
+  # `-C force-frame-pointers=yes -C target-cpu=znver4`). Keep whatever it set;
+  # every cargo call below passes --target explicitly, which is the single most
+  # important line in this recipe:
+  #
+  #   Without --target, Cargo compiles build scripts and proc macros for the
+  #   target with the same RUSTFLAGS. A znver4 proc-macro2 build script then
+  #   executes on GitHub's Zen 3 runner and dies with SIGILL, which is exactly
+  #   what forced the first attempt of this recipe down to x86-64-v3.
+  #   With --target, build scripts/proc macros are HOST units: they get no
+  #   target-cpu flag, run anywhere, while the app and its dependencies still
+  #   get the full znver4 flags. Same code, same ABI, real AVX-512.
   local base=${RUSTFLAGS:-}
+  local final_flags inst_flags
+  if [[ $base == *target-cpu=* ]]; then
+    final_flags=$base
+  else
+    final_flags="$base -C target-cpu=znver4"
+  fi
+  # The instrumented binary is executed during training, so it must run on the
+  # CI runner: x86-64-v3 has AVX2/BMI2/FMA but no AVX-512. The profile it
+  # records is target-independent and is applied to the znver4 rebuild.
+  inst_flags=$(sed -E 's/-C[[:space:]]+target-cpu=[^[:space:]]+/-C target-cpu=x86-64-v3/g' <<<"$final_flags")
+  [[ $inst_flags == *target-cpu=* ]] || inst_flags="$inst_flags -C target-cpu=x86-64-v3"
+
   local -a profile=(
     --config 'profile.release.opt-level=3'
     --config 'profile.release.lto="fat"'
     --config 'profile.release.codegen-units=1'
   )
 
-  msg2 "RUSTFLAGS: $base"
-  [[ $base == *target-cpu=* ]] ||
-    warning "RUSTFLAGS has no -C target-cpu=...; this build is not machine-optimised"
+  msg2 "target flags (final):   $final_flags"
+  msg2 "target flags (training): $inst_flags"
+  [[ $final_flags == *target-cpu=znver4* ]] ||
+    warning "final RUSTFLAGS have no -C target-cpu=znver4; this build is not v4"
 
   local profdir="$srcdir/pgo-prof" merged="$srcdir/pgo-prof/merged.profdata"
   rm -rf "$profdir"
   mkdir -p "$profdir"
   printf '0' >"$srcdir/.pgo-status"
-  printf '%s\n' "$base" >"$srcdir/.pgo-flags"
+  printf '%s\n' "$final_flags" >"$srcdir/.pgo-flags"
 
-  # Pass 1: instrumented binary, then a training run on real CLI workloads.
-  if RUSTFLAGS="$base -Cprofile-generate=$profdir" \
-       cargo build --frozen --release "${profile[@]}" &&
-     _pgo_train "$PWD/target/release/omafeed"; then
+  # Pass 1: v3 instrumented binary, trained on the real CLI.
+  if RUSTFLAGS="$inst_flags -Cprofile-generate=$profdir" \
+       cargo build --frozen --release --target "$triple" "${profile[@]}" &&
+     _pgo_train "$PWD/target/$triple/release/omafeed"; then
     if llvm-profdata merge -o "$merged" "$profdir"/*.profraw &&
-       RUSTFLAGS="$base -Cprofile-use=$merged -Cllvm-args=-pgo-warn-missing-function" \
-         cargo build --frozen --release "${profile[@]}"; then
+       RUSTFLAGS="$final_flags -Cprofile-use=$merged -Cllvm-args=-pgo-warn-missing-function" \
+         cargo build --frozen --release --target "$triple" "${profile[@]}"; then
       printf '1' >"$srcdir/.pgo-status"
       msg2 "PGO profile merged from $(find "$profdir" -name '*.profraw' | wc -l) runs"
       return 0
@@ -278,16 +301,17 @@ build() {
     warning "PGO instrumentation/training failed; falling back to a profile-less optimised build"
   fi
 
-  # Fallback: still fat LTO + one codegen unit, just without profile data.
-  # RUSTFLAGS must differ from the instrumented run so cargo rebuilds instead
-  # of leaving the (much slower) instrumented binary in place.
-  RUSTFLAGS="$base" cargo build --frozen --release "${profile[@]}"
+  # Fallback: still fat LTO + one codegen unit + znver4, just without profile
+  # data. RUSTFLAGS must differ from the instrumented run so cargo rebuilds
+  # instead of leaving the (much slower) instrumented binary in place.
+  RUSTFLAGS="$final_flags" cargo build --frozen --release --target "$triple" "${profile[@]}"
 }
 
 package() {
   cd "$pkgname-$pkgver"
 
-  make install DESTDIR="$pkgdir" PREFIX=/usr PKGNAME="$pkgname"
+  make install DESTDIR="$pkgdir" PREFIX=/usr PKGNAME="$pkgname" \
+    BIN="target/$CARCH-unknown-linux-gnu/release/omafeed"
 
   install -Dm644 /dev/stdin "$pkgdir/usr/share/doc/$pkgname/build-optimization.txt" <<EOF
 Built by arch-builds (mayank-v4), $(date -u +%Y-%m-%dT%H:%M:%SZ)
