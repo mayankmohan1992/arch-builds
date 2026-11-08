@@ -69,8 +69,25 @@ jobs:
         run: |
           pacman -Syu --noconfirm --needed curl python github-cli >/dev/null
           mkdir -p repo
-          gh release download "$REPO_NAME" --repo "$GH_REPO" --dir repo \
-            --pattern state.json --skip-existing || true
+          for attempt in 1 2 3; do
+            gh release download "$REPO_NAME" --repo "$GH_REPO" --dir repo \
+              --pattern state.json --skip-existing && break
+            sleep $((attempt * 5))
+          done || true
+          if [[ ! -s repo/state.json ]]; then
+            # Missing state is legitimate only before the first package exists.
+            # If the release already has packages, a download hiccup must not be
+            # read as "everything is missing" and queue a full rebuild (nodejs
+            # alone is a multi-hour job).
+            assets=$(gh release view "$REPO_NAME" --repo "$GH_REPO" \
+              --json assets \
+              --jq '[.assets[] | select(.name | endswith(".pkg.tar.zst"))] | length' \
+              2>/dev/null || echo 0)
+            if (( ${assets:-0} > 0 )); then
+              echo "::error::state.json is missing but the release has $assets packages; refusing to plan a full rebuild"
+              exit 1
+            fi
+          fi
           read -r -a req <<<"$REQUESTED" || true
           ./scripts/plan.sh "${req[@]}"
 

@@ -37,7 +37,27 @@ fi
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-curl -sfL "$STATE_URL" -o "$tmp/state.json" 2>/dev/null || echo '{}' >"$tmp/state.json"
+# The release asset can return a transient 504 from GitHub's CDN. Treating that
+# as "nothing is published" would queue every package for a rebuild, including
+# nodejs' multi-hour build. Retry, and if it still cannot be read, do not
+# dispatch at all: the next timer run will try again.
+fetch_state() {
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    if curl -sfL --max-time 30 "$STATE_URL" -o "$tmp/state.json" &&
+       python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$tmp/state.json" 2>/dev/null; then
+      return 0
+    fi
+    rm -f "$tmp/state.json"
+    sleep $((attempt * 5))
+  done
+  return 1
+}
+
+if ! fetch_state; then
+  log "state.json could not be downloaded or is not valid JSON; not dispatching (a blind run would rebuild everything)"
+  exit 0
+fi
 
 need=()
 lookup_failed=0

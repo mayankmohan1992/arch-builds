@@ -72,8 +72,17 @@ for spec in "${specs[@]}"; do
       ;;
     *)
       if ! upstream=$(upstream_version "$kind" "$name"); then
-        # Cannot tell: build anyway. ci-build.sh re-checks and no-ops if current.
-        echo "plan: $name: upstream lookup failed, planning it anyway" >&2
+        # Cannot tell whether it moved. Queueing every package during an
+        # upstream API outage means a full matrix (nodejs is hours) and
+        # ci-build would no-op them anyway, so keep what is published and try
+        # again next run. A package with nothing published yet is still planned.
+        if [[ -n $published ]]; then
+          echo "plan: $name: upstream lookup failed; keeping published=$published" >&2
+          failed_lookup=1
+          skipped=$((skipped + 1))
+          continue
+        fi
+        echo "plan: $name: upstream lookup failed and nothing is published; planning" >&2
         failed_lookup=1
         selected+=("$spec")
         continue
