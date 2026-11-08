@@ -248,6 +248,7 @@ for spec in $PKGS; do
   makepkg_once() {
     ( cd "$src" && env "${extra_env[@]}" \
        PKGDEST="$GITHUB_WORKSPACE/out" SRCDEST="$GITHUB_WORKSPACE/srcdest" \
+       PACKAGER="Mayank Mohan <er.mayankmohan@gmail.com>" \
        RUSTFLAGS="$rust_flags" CARGO_BUILD_JOBS="$(nproc)" \
        makepkg --config "$build_conf" -s --noconfirm --nocheck --cleanbuild --sign --key "$KEYID" "${pgp_flags[@]}" ) \
       2>&1 | tee -a "$build_log"
