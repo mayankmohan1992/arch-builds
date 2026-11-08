@@ -107,6 +107,18 @@ local:t3code
 # service: the app only runs when launched by hand.
 local:omafeed
 
+# --- Coverage gaps: no v4 repo ships these any more --------------------------
+# ALHP's core/extra-x86-64-v4 no longer carry these three, so the only v4 build
+# that ever existed is the one installed from ALHP's older set (pkgrel .1).
+# With no repo offering it, pacman prints "local (x-1.1) is newer than extra
+# (x-1)" on every upgrade and never refreshes the package. Publishing them here
+# at the same <pkgver>-<pkgrel>.1 keeps the v4 build and ends the warning. All
+# three are cheap builds that never execute their own output, so they are safe
+# on a Zen 3 runner.
+fakeroot
+docker-buildx
+limine
+
 # --- Deliberately excluded ---------------------------------------------------
 # System-breaking: glibc, gcc/gcc-libs, binutils, base, filesystem,
 #   linux-firmware/*, keyrings, pacman-mirrorlist, the kernel. ALHP excludes
