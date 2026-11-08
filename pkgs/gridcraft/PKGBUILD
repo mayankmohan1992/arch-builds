@@ -1,28 +1,38 @@
-# Maintainer: Caleb Maclennan <caleb@alerque.com>
+# Maintainer: Mayank Mohan <er.mayankmohan@gmail.com>
+#
+# GridCraft, rebuilt for this repo with `omarchy-theme.patch`: the app takes its chrome
+# colours from the active Omarchy theme (`~/.local/state/omarchy/current/theme/colors.toml`)
+# and follows `omarchy theme set` live, instead of painting its own fixed palette.
+#
+# Vendored instead of `aur:gridcraft` because a patch has to be applied. TRACK keeps the
+# pkgver following upstream releases, so the update timer dispatches a rebuild when
+# ArtCraft ships. If a bump makes the patch stop applying, refresh it — the build fails
+# loudly rather than shipping an unthemed binary.
 
 pkgname=gridcraft
-pkgver=0.13.0
-pkgrel=1
+pkgver=0.17.0
+pkgrel=2
 url="https://getartcraft.com/apps/$pkgname"
 _url="https://github.com/storytold/$pkgname"
-pkgdesc='vibe coded clean-room reimplementation of Microsoft Excel'
+pkgdesc='Clean-room spreadsheet in pure Rust that opens and saves Excel workbooks, themed by Omarchy'
 arch=(x86_64)
 license=(MIT Apache-2.0)
 depends=(glibc # libc.so libm.so
          hicolor-icon-theme
          libgcc)
 makedepends=(cargo)
+# Upstream ships release binaries without debug info, and debug sections are what carry
+# the build directory into the package.
+options=(!debug)
 _archive="$pkgname-$pkgver"
-source=("$_url/archive/refs/tags/v$pkgver/$_archive.tar.gz")
-sha256sums=('b33b6ab1f9032b0ccf6fbbe281affa618a325bf54030fa0d017a7fc1bf2f8251')
+source=("$_url/archive/refs/tags/v$pkgver/$_archive.tar.gz"
+        omarchy-theme.patch)
+sha256sums=('eabb7f383f45b98d852b5a4787ff16a6fcbaca3dd1aaf9213a69de78f14fdc75'
+            'SKIP')
 
 _srcenv() {
 	cd "$_archive"
 	export CARGO_HOME="$srcdir"
-	if check_option debug y; then
-		export CARGO_PROFILE_RELEASE_DEBUG=2
-		export CARGO_PROFILE_RELEASE_STRIP=false
-	fi
 	if check_option lto y; then
 		export CARGO_PROFILE_RELEASE_LTO=thin
 		export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
@@ -36,13 +46,19 @@ _srcenv() {
 _icons=(512 256 128 64 48 32 16)
 
 prepare() {
+	cd "$srcdir"
+	patch -Np1 -d "$_archive" -i "$srcdir/omarchy-theme.patch"
 	_srcenv
 	cargo fetch --locked --target host-tuple
 }
 
 build() {
 	_srcenv
-	cargo build --frozen --release
+	# Keep whatever the build environment sets (the CI's `-C target-cpu=znver4` comes
+	# from makepkg.conf) and add a path remap so panic locations do not embed the
+	# builder's scratch directory.
+	RUSTFLAGS="${RUSTFLAGS:--C target-cpu=znver4} --remap-path-prefix=$srcdir=/build" \
+		cargo build --frozen --release --package "$pkgname" --package "$pkgname-cli"
 }
 
 package() {

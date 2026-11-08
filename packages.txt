@@ -44,12 +44,18 @@ gcr
 gcr-4
 fwupd
 
-# --- Tier 3: ArtCraft desktop apps (AUR) ------------------------------------
+# --- Tier 3: ArtCraft desktop apps ------------------------------------------
 # Rust apps from getartcraft.com, maintained in the AUR by alerque. Cloned at
 # build time, so `check-upstream.sh` sees a new AUR version and dispatches.
 # RUSTFLAGS=-C target-cpu=znver4 plus each recipe's own thin-LTO and
 # opt-level=3 settings produce the fastest binaries.
-aur:gridcraft
+#
+# Exceptions are `local:` recipes under pkgs/: a vendored copy of the AUR recipe
+# plus a patch. gridcraft is the first — it reads the active Omarchy theme
+# (colors.toml) and follows `omarchy theme set` live, which the AUR recipe has no
+# hook for. Its TRACK file follows upstream tags, so it still rebuilds by itself
+# when ArtCraft ships; a bump that breaks the patch fails that one build visibly.
+local:gridcraft
 aur:pdfcraft
 aur:wordcraft
 aur:cadcraft

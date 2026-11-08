@@ -1,0 +1,295 @@
+diff --git a/crates/ui-egui/src/app/prefs.rs b/crates/ui-egui/src/app/prefs.rs
+index 216e4a5..05c2f63 100644
+--- a/crates/ui-egui/src/app/prefs.rs
++++ b/crates/ui-egui/src/app/prefs.rs
+@@ -25,6 +25,11 @@ impl SheetApp {
+             ctx.request_repaint();
+         }
+         self.effective_dark = ctx.theme() == egui::Theme::Dark;
++        // Omarchy's theme file changes when `omarchy theme set` runs; a slow repaint
++        // heartbeat lets a running GridCraft retint itself without a restart.
++        if crate::theme::omarchy_available() {
++            ctx.request_repaint_after(std::time::Duration::from_millis(1200));
++        }
+     }
+ 
+     /// Keeps egui's own keyboard zoom and quit shortcuts off and applies GridCraft's zoom factor.
+diff --git a/crates/ui-egui/src/theme.rs b/crates/ui-egui/src/theme.rs
+index 343fd79..2d7eb6d 100644
+--- a/crates/ui-egui/src/theme.rs
++++ b/crates/ui-egui/src/theme.rs
+@@ -22,6 +22,7 @@ use egui::{Color32, FontData, FontDefinitions, FontFamily, FontId, Stroke, Visua
+ 
+ mod font_fallback;
+ mod font_setup;
++mod omarchy;
+ 
+ pub use font_fallback::symbol_face_installed;
+ #[cfg(test)]
+@@ -292,7 +293,9 @@ impl Tokens {
+     }
+ 
+     pub fn get(ctx: &egui::Context) -> Tokens {
+-        if ctx.global_style().visuals.dark_mode { Tokens::dark() } else { Tokens::light() }
++        let dark = ctx.global_style().visuals.dark_mode;
++        // Omarchy's theme decides the chrome when the machine runs one (see `omarchy`).
++        omarchy::tokens(dark).unwrap_or(if dark { Tokens::dark() } else { Tokens::light() })
+     }
+ 
+     /// One colour of the category palette.
+@@ -307,6 +310,11 @@ impl Tokens {
+     }
+ }
+ 
++/// Whether Omarchy's theme is readable on this machine.
++pub fn omarchy_available() -> bool {
++    omarchy::available()
++}
++
+ /// WCAG 2 relative luminance of an opaque colour.
+ pub fn luminance(c: Color32) -> f32 {
+     let lin = |v: u8| {
+@@ -327,7 +335,7 @@ pub fn apply(ctx: &egui::Context, dark: bool) {
+     // Install both palettes before System can switch between the style slots.
+     for theme in [egui::Theme::Light, egui::Theme::Dark] {
+         let dark = theme == egui::Theme::Dark;
+-        let t = if dark { Tokens::dark() } else { Tokens::light() };
++        let t = omarchy::tokens(dark).unwrap_or(if dark { Tokens::dark() } else { Tokens::light() });
+         let mut v = if dark { Visuals::dark() } else { Visuals::light() };
+         v.panel_fill = t.window;
+         v.window_fill = t.menu_bg;
+diff --git a/crates/ui-egui/src/theme/omarchy.rs b/crates/ui-egui/src/theme/omarchy.rs
+new file mode 100644
+index 0000000..2b934f9
+--- /dev/null
++++ b/crates/ui-egui/src/theme/omarchy.rs
+@@ -0,0 +1,229 @@
++//! Omarchy's active theme, when this machine runs one.
++//!
++//! Omarchy describes the theme in `~/.local/state/omarchy/current/theme/colors.toml` — the same
++//! file its bar, terminal and editor are generated from — and re-renders that file whenever
++//! `omarchy theme set` runs. Reading it here means GridCraft stops looking like its own product
++//! and starts looking like the desktop it is open on.
++//!
++//! The file is re-read when its modification time changes (a stat per frame while the cache is
++//! warm, a parse only on a real change), so switching theme in Omarchy retints a running GridCraft
++//! without a restart. `CRAFT_THEME_FILE` points the reader at another `colors.toml` (absolute
++//! paths only) for testing and for machines that stage themes elsewhere.
++//!
++//! Only chrome is taken from the theme. The sheet stays white and its own colours (cells, grid
++//! lines, macro overlays) stay as they are: a spreadsheet is a sheet of paper, and the contrast
++//! tests in `theme.rs` hold the chrome pairs to WCAG 2 in both appearances.
++
++use std::collections::HashMap;
++use std::path::PathBuf;
++use std::sync::Mutex;
++use std::time::SystemTime;
++
++use egui::Color32;
++
++use super::Tokens;
++
++/// One parsed `colors.toml`: named colours plus the appearance it describes.
++struct Palette {
++    colors: HashMap<String, Color32>,
++    light_mode: bool,
++}
++
++static CACHE: Mutex<Option<(SystemTime, Palette)>> = Mutex::new(None);
++
++fn theme_path() -> Option<PathBuf> {
++    if let Some(path) = std::env::var_os("CRAFT_THEME_FILE").map(PathBuf::from).filter(|p| p.is_absolute()) {
++        return Some(path);
++    }
++    let state = std::env::var_os("XDG_STATE_HOME")
++        .map(PathBuf::from)
++        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))?;
++    Some(state.join("omarchy").join("current").join("theme").join("colors.toml"))
++}
++
++fn parse_hex(value: &str) -> Option<Color32> {
++    let digits = value.trim().trim_matches('"').trim_matches('\'').trim_start_matches('#');
++    if digits.len() != 6 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
++        return None;
++    }
++    let n = u32::from_str_radix(digits, 16).ok()?;
++    Some(Color32::from_rgb((n >> 16) as u8, (n >> 8) as u8, n as u8))
++}
++
++fn read(path: &PathBuf) -> Option<Palette> {
++    let text = std::fs::read_to_string(path).ok()?;
++    let mut colors = HashMap::new();
++    let mut light_mode = false;
++    for line in text.lines() {
++        let line = line.trim();
++        if line.is_empty() || line.starts_with('#') {
++            continue;
++        }
++        let Some((key, value)) = line.split_once('=') else { continue };
++        let key = key.trim();
++        let value = value.trim().trim_matches('"');
++        if key == "mode" {
++            light_mode = value.eq_ignore_ascii_case("light");
++            continue;
++        }
++        if let Some(color) = parse_hex(value) {
++            colors.insert(key.to_string(), color);
++        }
++    }
++    if colors.is_empty() {
++        return None;
++    }
++    Some(Palette { colors, light_mode })
++}
++
++/// The parsed theme, re-read when the file changes. `None` when there is no Omarchy theme.
++fn palette() -> Option<Palette> {
++    let path = theme_path()?;
++    let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok()?;
++    let mut cache = CACHE.lock().unwrap_or_else(|poison| poison.into_inner());
++    if let Some((stamp, palette)) = cache.as_ref()
++        && *stamp == modified
++    {
++        return Some(Palette { colors: palette.colors.clone(), light_mode: palette.light_mode });
++    }
++    let palette = read(&path)?;
++    *cache = Some((modified, Palette { colors: palette.colors.clone(), light_mode: palette.light_mode }));
++    Some(palette)
++}
++
++/// Whether a theme is readable right now (the app asks for a repaint while it is).
++pub fn available() -> bool {
++    palette().is_some()
++}
++
++/// How far a colour has been mixed into `toward` (0.0 = unchanged, 1.0 = `toward`).
++fn mix(from: Color32, toward: Color32, amount: f32) -> Color32 {
++    let a = amount.clamp(0.0, 1.0);
++    let at = |x: u8, y: u8| (f32::from(x) * (1.0 - a) + f32::from(y) * a).round() as u8;
++    Color32::from_rgb(at(from.r(), toward.r()), at(from.g(), toward.g()), at(from.b(), toward.b()))
++}
++
++/// `color` at `alpha` (0-255), unmultiplied so it draws over whatever is beneath.
++fn alpha(color: Color32, alpha: u8) -> Color32 {
++    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
++}
++
++impl Palette {
++    fn get(&self, key: &str) -> Option<Color32> {
++        self.colors.get(key).copied()
++    }
++
++    /// A named colour from the theme, or `fallback`.
++    fn or(&self, key: &str, fallback: Color32) -> Color32 {
++        self.get(key).unwrap_or(fallback)
++    }
++}
++
++/// GridCraft's chrome in Omarchy's colours, or `None` when the theme describes the other
++/// appearance (or there is no theme at all).
++pub fn tokens(dark: bool) -> Option<Tokens> {
++    let theme = palette()?;
++    if theme.light_mode == dark {
++        return None;
++    }
++
++    let mut t = if dark { Tokens::dark() } else { Tokens::light() };
++
++    // The neutral ramp, straight from the theme.
++    let background = theme.or("background", t.window);
++    let darker = theme.or("darker_background", mix(background, Color32::BLACK, 0.25));
++    let ribbon = theme.or("dark_background", mix(background, Color32::BLACK, 0.12));
++    let lighter = theme.or("lighter_background", mix(background, Color32::WHITE, 0.08));
++    let foreground = theme.or("foreground", t.text);
++    let light_foreground = theme.or("light_foreground", mix(foreground, background, 0.3));
++    let muted = theme.or("muted", mix(foreground, background, 0.5));
++    let selection = theme.or("selection", mix(background, foreground, 0.12));
++
++    // The accent and the surfaces derived from it.
++    let accent = theme.or("accent", t.accent);
++    let on_accent = if super::luminance(accent) > 0.5 { darker } else { Color32::WHITE };
++
++    t.dark = dark;
++    t.window = background;
++    t.ribbon = ribbon;
++    t.ribbon_border = lighter;
++    t.text = foreground;
++    t.text_dim = light_foreground;
++    t.text_disabled = muted;
++    t.accent = accent;
++    t.accent_dark = mix(accent, darker, 0.35);
++    t.accent_soft = mix(background, accent, 0.18);
++    t.hover = if dark { mix(background, Color32::WHITE, 0.08) } else { mix(background, Color32::BLACK, 0.06) };
++    t.pressed = if dark { mix(background, Color32::WHITE, 0.14) } else { mix(background, Color32::BLACK, 0.12) };
++    t.separator = lighter;
++    t.desk = darker;
++    t.header_bg = ribbon;
++    t.header_text = foreground;
++    t.header_line = lighter;
++    t.header_sel_bg = selection;
++    t.header_sel_text = accent;
++    t.header_all_bg = mix(background, accent, 0.28);
++    t.sel_fill = alpha(accent, if dark { 40 } else { 34 });
++    t.active_row = alpha(accent, if dark { 26 } else { 20 });
++    t.sel_border = accent;
++    t.input_bg = darker;
++    t.input_border = lighter;
++    t.tab_bar = background;
++    t.tab_active = ribbon;
++    t.status_bar = background;
++    t.menu_bg = ribbon;
++    t.shadow = if dark { Color32::from_black_alpha(96) } else { Color32::from_black_alpha(40) };
++    t.on_accent = on_accent;
++
++    // Status colours by their own names.
++    t.danger = theme.or("red", t.danger);
++    t.warning = theme.or("yellow", t.warning);
++    t.warning_fill = theme.or("yellow", t.warning_fill);
++    t.warning_ink = if super::luminance(t.warning_fill) > 0.5 { rgb(0x1F, 0x1F, 0x1F) } else { Color32::WHITE };
++    t.recording = theme.or("red", t.recording);
++    t.breakpoint = theme.or("red", t.breakpoint);
++    t.error_check_green = theme.or("green", t.error_check_green);
++    t.badge_py = theme.or("green", t.badge_py);
++    t.notice_warn_bg = mix(background, theme.or("yellow", t.warning_fill), 0.16);
++    t.notice_warn_border = mix(background, theme.or("yellow", t.warning_fill), 0.42);
++    t.notice_info_bg = mix(background, theme.or("blue", accent), 0.16);
++    t.notice_info_border = mix(background, theme.or("blue", accent), 0.42);
++    t.on_warning = t.warning_ink;
++
++    // Series and syntax colours: the theme's own named colours, so charts and code read like
++    // the rest of the desktop rather than like a spreadsheet from 2003.
++    t.cat = [
++        theme.or("blue", t.cat[0]),
++        theme.or("green", t.cat[1]),
++        theme.or("orange", t.cat[2]),
++        theme.or("red", t.cat[3]),
++        theme.or("magenta", t.cat[4]),
++        theme.or("cyan", t.cat[5]),
++        theme.or("brown", t.cat[6]),
++        theme.or("muted", t.cat[7]),
++    ];
++    t.ref_colors = [
++        theme.or("blue", t.ref_colors[0]),
++        theme.or("red", t.ref_colors[1]),
++        theme.or("magenta", t.ref_colors[2]),
++        theme.or("green", t.ref_colors[3]),
++        theme.or("orange", t.ref_colors[4]),
++        theme.or("cyan", t.ref_colors[5]),
++        theme.or("brown", t.ref_colors[6]),
++        theme.or("yellow", t.ref_colors[7]),
++    ];
++    t.syntax.keyword = theme.or("blue", t.syntax.keyword);
++    t.syntax.string = theme.or("green", t.syntax.string);
++    t.syntax.number = theme.or("magenta", t.syntax.number);
++    t.syntax.comment = theme.or("muted", t.syntax.comment);
++    t.syntax.builtin = theme.or("yellow", t.syntax.builtin);
++
++    // The page in Page Layout view; the sheet itself stays white.
++    t.paper = if dark { mix(background, Color32::WHITE, 0.12) } else { Color32::WHITE };
++
++    Some(t)
++}
++
++fn rgb(r: u8, g: u8, b: u8) -> Color32 {
++    Color32::from_rgb(r, g, b)
++}
